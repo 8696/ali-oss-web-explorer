@@ -4,7 +4,7 @@
  * 应用根组件,职责:
  *   1. 组装所有 Hooks(Config / Client / Files / Upload);
  *   2. 作为唯一的状态提升层,把各 Hook 的输入输出连接起来;
- *   3. 渲染子组件(Toolbar / Breadcrumbs / FileTable / 各种弹窗);
+ *   3. 渲染子组件(Toolbar / Breadcrumbs / FileTable / 各种弹窗,含重命名);
  *   4. 不包含复杂 UI 逻辑,仅做"接线"工作。
  */
 
@@ -25,8 +25,10 @@ import { FileTable } from '@/components/FileTable';
 import { UploadDrawer } from '@/components/UploadDrawer';
 import { CreateFolderModal } from '@/components/CreateFolderModal';
 import { GenerateUrlModal } from '@/components/GenerateUrlModal';
+import { RenameModal } from '@/components/RenameModal';
 import { getSignedAccessUrl } from '@/services/oss';
-import type { FileEntry } from '@/types/oss';
+import type { FileEntry, RenameDirectoryProgress } from '@/types/oss';
+import { extractName } from '@/utils/format';
 
 const { Header, Content } = Layout;
 
@@ -40,7 +42,7 @@ const AppInner: React.FC = () => {
   // ====== 状态管理 ======
   const { config, setConfig, clearConfig } = useOSSConfig();
   const { client, connecting, connected, error: connectError } = useOSSClient(config);
-  const { prefix, entries, loading, error: listError, navigate, refresh, createFolder, removeEntry, removeEntries } = useOSSFiles(client);
+  const { prefix, entries, loading, error: listError, navigate, refresh, createFolder, removeEntry, removeEntries, renameEntry } = useOSSFiles(client);
 
   /**
    * 上传任务:整批任务全部完成后才统一刷新文件列表并统一提示
@@ -76,6 +78,12 @@ const AppInner: React.FC = () => {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [generateUrlOpen, setGenerateUrlOpen] = useState(false);
   const [generateUrlEntry, setGenerateUrlEntry] = useState<FileEntry | null>(null);
+  /** 重命名弹窗是否打开 */
+  const [renameOpen, setRenameOpen] = useState(false);
+  /** 当前正在重命名的条目;关闭弹窗或成功后置 null */
+  const [renameTarget, setRenameTarget] = useState<FileEntry | null>(null);
+  /** 目录重命名时 OSS 复制/删除进度,单文件重命名不使用 */
+  const [renameDirProgress, setRenameDirProgress] = useState<RenameDirectoryProgress | null>(null);
 
   /**
    * 当前目录的文件统计
@@ -217,6 +225,53 @@ const AppInner: React.FC = () => {
     [],
   );
 
+  /**
+   * 打开重命名弹窗并记录目标条目
+   */
+  const handleOpenRename = useCallback((entry: FileEntry) => {
+    setRenameDirProgress(null);
+    setRenameTarget(entry);
+    setRenameOpen(true);
+  }, []);
+
+  /**
+   * 重命名确认:调用 Hook 内 renameEntry,成功后刷新由 Hook 完成
+   *
+   * - 若该行处于多选选中状态,将 `selectedRowKeys` 中对应的旧 key 替换为 `newPath`,避免勾选状态失效;
+   * - 成功提示使用 `extractName(newPath)` 展示最终名称(目录无尾斜杠的展示与列表一致)。
+   * - 失败时 `message.error` 后向上抛出,弹窗保留表单输入;目录失败时附加控制台排查提示。
+   */
+  const handleRenameConfirm = useCallback(
+    async (newName: string) => {
+      if (!renameTarget) return;
+      setRenameDirProgress(null);
+      try {
+        const { newPath } = await renameEntry(
+          renameTarget,
+          newName,
+          renameTarget.type === 'directory' ? (p) => setRenameDirProgress(p) : undefined,
+        );
+        setSelectedRowKeys((keys) =>
+          keys.includes(renameTarget.key) ? keys.map((k) => (k === renameTarget.key ? newPath : k)) : keys,
+        );
+        message.success(`已重命名为「${extractName(newPath)}」`);
+        setRenameOpen(false);
+        setRenameTarget(null);
+      } catch (err) {
+        const base = err instanceof Error ? err.message : '重命名失败';
+        const dirHint =
+          renameTarget.type === 'directory'
+            ? ' 若操作未完成，请到 OSS 控制台检查新旧路径下是否残留部分对象。'
+            : '';
+        message.error(base + dirHint);
+        throw err;
+      } finally {
+        setRenameDirProgress(null);
+      }
+    },
+    [renameEntry, renameTarget, message],
+  );
+
   const handleGenerateUrlAction = useCallback(
     (expiresMinutes: number) => {
       if (!client || !generateUrlEntry) return '';
@@ -321,6 +376,7 @@ const AppInner: React.FC = () => {
             onNavigate={navigate}
             onDownload={handleDownload}
             onDelete={handleDelete}
+            onRename={handleOpenRename}
             onGenerateUrl={handleGenerateUrl}
           />
         </div>
@@ -359,6 +415,19 @@ const AppInner: React.FC = () => {
           setGenerateUrlOpen(false);
           setGenerateUrlEntry(null);
         }}
+      />
+
+      {/* 单文件/单目录重命名:表单仅收集新名称,OSS 侧见 services/oss.renameEntry */}
+      <RenameModal
+        open={renameOpen}
+        entry={renameTarget}
+        directoryProgress={renameDirProgress}
+        onCancel={() => {
+          setRenameOpen(false);
+          setRenameTarget(null);
+          setRenameDirProgress(null);
+        }}
+        onConfirm={handleRenameConfirm}
       />
     </Layout>
   );

@@ -10,7 +10,7 @@
  */
 
 import OSS from 'ali-oss';
-import type { OSSConfig, FileEntry, ListFilesResult } from '@/types/oss';
+import type { OSSConfig, FileEntry, ListFilesResult, RenameDirectoryProgress } from '@/types/oss';
 import { extractName } from '@/utils/format';
 
 /**
@@ -303,6 +303,251 @@ export function isPreviewable(objectKey: string): boolean {
   const name = objectKey.split('/').pop() ?? '';
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
   return PREVIEWABLE_EXTENSIONS.has(ext);
+}
+
+/**
+ * 清洗重命名时用户输入的「最后一段」名称(仅文件名或文件夹名,不含父路径)
+ *
+ * 规则与「新建文件夹」一致:去掉首尾空白、去掉路径分隔符、拒绝 `.` / `..`、限制长度。
+ * 若用户粘贴了带路径的字符串,`replace(/[\\/]+/g, '')` 会去掉其中的 `/` `\`,避免误写成子路径。
+ *
+ * @param raw 表单中的原始输入
+ * @returns 可用于拼接父前缀的合法名称片段
+ * @throws 名称为空、无效或超长时抛出带中文说明的 Error
+ */
+function sanitizeEntryBaseName(raw: string): string {
+  const sanitized = raw.trim().replace(/[\\/]+/g, '');
+  if (!sanitized) {
+    throw new Error('名称不能为空');
+  }
+  if (sanitized === '.' || sanitized === '..') {
+    throw new Error('名称无效');
+  }
+  if (sanitized.length > 255) {
+    throw new Error('名称不能超过 255 个字符');
+  }
+  return sanitized;
+}
+
+/**
+ * 从条目的完整 OSS Key 反推「父目录前缀」,用于与新名称拼接成目标 Key
+ *
+ * - 文件 `a/b/c.txt` → 父前缀 `a/b/`, 新 Key 为 `a/b/<新名称>`
+ * - 目录 `a/b/c/`  → 父前缀 `a/b/`, 新前缀为 `a/b/<新名称>/`
+ * - 根下对象 `readme.txt` → 父前缀 ``
+ *
+ * @param entry 当前列表中的文件或目录条目
+ */
+function parentPrefixFromEntry(entry: FileEntry): string {
+  if (entry.type === 'directory') {
+    const trimmed = entry.path.endsWith('/') ? entry.path.slice(0, -1) : entry.path;
+    const idx = trimmed.lastIndexOf('/');
+    return idx === -1 ? '' : trimmed.slice(0, idx + 1);
+  }
+  const idx = entry.path.lastIndexOf('/');
+  return idx === -1 ? '' : entry.path.slice(0, idx + 1);
+}
+
+/**
+ * 确认「目标文件 Key」尚不存在,避免 copy 覆盖已有对象
+ *
+ * 使用 head; 404/NoSuchKey 视为可用,其余错误原样抛出(网络、权限等)。
+ *
+ * @param client OSS 客户端
+ * @param objectKey 即将写入的完整对象 Key(无尾斜杠)
+ * @throws 对象已存在时抛出「已存在同名文件」
+ */
+async function assertFileDestinationFree(client: OSS, objectKey: string): Promise<void> {
+  try {
+    await client.head(objectKey);
+    throw new Error('已存在同名文件');
+  } catch (err: unknown) {
+    const e = err as { status?: number; code?: string; message?: string };
+    if (e?.message === '已存在同名文件') {
+      throw err;
+    }
+    if (e?.status === 404 || e?.code === 'NoSuchKey') {
+      return;
+    }
+    throw err instanceof Error ? err : new Error('OSS 操作失败');
+  }
+}
+
+/**
+ * 确认「目标目录前缀」下可以安全创建新目录树,不与已有对象冲突
+ *
+ * 分两步:
+ * 1. `head(去掉尾斜杠的 Key)` — 若存在与「目录同名且无尾斜杠」的文件(如 `foo` 与 `foo/` 并存场景),禁止重命名;
+ * 2. `list(prefix=dirPrefix, max-keys=1)` — 若前缀下已有任意对象或 CommonPrefix,说明目标已被占用或已有内容。
+ *
+ * @param client OSS 客户端
+ * @param dirPrefix 目录前缀,必须以 `/` 结尾
+ * @throws 目标处已有文件、文件夹或对象时抛出中文 Error
+ */
+/** 删除对象;不存在(404/NoSuchKey)时静默成功,其余错误抛出 */
+async function deleteObjectIgnoreNotFound(client: OSS, objectKey: string): Promise<void> {
+  try {
+    await client.delete(objectKey);
+  } catch (err: unknown) {
+    const e = err as { status?: number; code?: string };
+    if (e?.status === 404 || e?.code === 'NoSuchKey') {
+      return;
+    }
+    throw err instanceof Error ? err : new Error('OSS 操作失败');
+  }
+}
+
+async function assertDirectoryDestinationFree(client: OSS, dirPrefix: string): Promise<void> {
+  if (!dirPrefix.endsWith('/')) {
+    throw new Error('目录前缀必须以 "/" 结尾');
+  }
+  const withoutSlash = dirPrefix.slice(0, -1);
+  try {
+    await client.head(withoutSlash);
+    throw new Error('已存在同名的文件');
+  } catch (err: unknown) {
+    const e = err as { status?: number; code?: string; message?: string };
+    if (e?.message === '已存在同名的文件') {
+      throw err;
+    }
+    if (e?.status === 404 || e?.code === 'NoSuchKey') {
+      /* 目标处无同名文件,继续检查前缀下是否已有对象 */
+    } else {
+      throw err instanceof Error ? err : new Error('OSS 操作失败');
+    }
+  }
+  const res = await client.list(
+    {
+      prefix: dirPrefix,
+      'max-keys': 1,
+    },
+    {},
+  );
+  if ((res.objects?.length ?? 0) > 0 || (res.prefixes?.length ?? 0) > 0) {
+    throw new Error('目标路径已存在文件夹或对象');
+  }
+}
+
+/**
+ * 重命名文件或目录(OSS 无 rename API,等价于 CopyObject + Delete)
+ *
+ * **文件**
+ * - 在同级目录下更换「最后一段」名称:新 Key = 父前缀 + 清洗后的新名称。
+ * - 先 head 目标 Key 防覆盖,再 `copy(目标, 源)`,最后 `delete(源)`。
+ *
+ * **目录**
+ * - 用 `list({ prefix: 旧目录/, delimiter 不设 })` 分页收集其下全部对象 Key(含目录占位对象本身)。
+ * - 将每个 Key 映射为 `新目录前缀 + 相对旧前缀的后缀`,逐个服务端复制。
+ * - 全部复制成功后,按批 `deleteMulti` 删除旧 Key(每批最多 1000 条,与删除目录逻辑一致)。
+ * - 若列举结果为空(极少见),则在新前缀写入 0 字节目录占位对象,并尝试删除旧前缀占位(不存在则忽略),与 `createDirectory` 行为对齐。
+ * - 目录下对象较多时按批并发 `copy`(每批条数有上限),并通过 `onDirectoryProgress` 上报复制/删除进度。
+ *
+ * **限制与风险**
+ * - 非原子:复制与删除之间若失败,可能残留部分新 Key 或旧 Key,需人工对照控制台清理。
+ * - 禁止将目录重命名到自身子路径下(例如 `a/` → `a/b/`),否则逻辑与存储结构不成立。
+ * - 浏览器端需 CORS 与权限支持 Copy(通常表现为对目标 Key 的 PUT);错误会经 `normalizeOSSBrowserError` 归一化。
+ *
+ * @param client OSS 客户端
+ * @param entry 被重命名的列表条目(含完整 path 与 type)
+ * @param newName 用户输入的新名称(仅最后一段,不含 `/`)
+ * @param onDirectoryProgress 仅目录重命名时回调:复制与 deleteMulti 各阶段进度
+ * @returns `newPath` 重命名后的完整对象路径;目录结果恒以 `/` 结尾
+ * @throws 名称未变、目标已存在、非法名称、OSS 或网络错误
+ */
+const RENAME_COPY_CONCURRENCY = 8;
+
+export async function renameEntry(
+  client: OSS,
+  entry: FileEntry,
+  newName: string,
+  onDirectoryProgress?: (p: RenameDirectoryProgress) => void,
+): Promise<{ newPath: string }> {
+  const base = sanitizeEntryBaseName(newName);
+  if (base === entry.name) {
+    throw new Error('名称未改变');
+  }
+
+  const parent = parentPrefixFromEntry(entry);
+
+  try {
+    if (entry.type === 'file') {
+      const destKey = `${parent}${base}`;
+      if (destKey === entry.path) {
+        throw new Error('名称未改变');
+      }
+      await assertFileDestinationFree(client, destKey);
+      // ali-oss: copy(目标名, 源名), 同桶服务端复制
+      await client.copy(destKey, entry.path);
+      await client.delete(entry.path);
+      return { newPath: destKey };
+    }
+
+    // 目录统一成「以 / 结尾」的前缀,便于列举其下所有对象
+    const oldPrefix = entry.path.endsWith('/') ? entry.path : `${entry.path}/`;
+    const destPrefix = `${parent}${base}/`;
+
+    if (destPrefix === oldPrefix) {
+      throw new Error('名称未改变');
+    }
+    if (destPrefix.startsWith(oldPrefix)) {
+      throw new Error('不能将文件夹重命名到自身路径下');
+    }
+
+    await assertDirectoryDestinationFree(client, destPrefix);
+
+    // 收集旧前缀下全部对象(不使用 delimiter,才能包含深层文件)
+    const keys: string[] = [];
+    let marker: string | undefined;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const res = await client.list(
+        {
+          prefix: oldPrefix,
+          'max-keys': 1000,
+          marker,
+        },
+        {},
+      );
+      for (const obj of res.objects ?? []) {
+        keys.push(obj.name);
+      }
+      if (!res.isTruncated) break;
+      marker = res.nextMarker;
+    }
+
+    // 空目录:无列举结果则写新占位,并尽量删掉旧前缀占位(与列表占位约定一致,带尾斜杠)
+    if (keys.length === 0) {
+      onDirectoryProgress?.({ phase: 'copy', done: 0, total: 1 });
+      await client.put(destPrefix, new Blob([], { type: 'application/x-directory' }));
+      onDirectoryProgress?.({ phase: 'copy', done: 1, total: 1 });
+      await deleteObjectIgnoreNotFound(client, oldPrefix);
+      return { newPath: destPrefix };
+    }
+
+    const pairs = keys.map((key) => {
+      const suffix = key.startsWith(oldPrefix) ? key.slice(oldPrefix.length) : key;
+      return { src: key, dest: `${destPrefix}${suffix}` };
+    });
+    const total = pairs.length;
+    onDirectoryProgress?.({ phase: 'copy', done: 0, total });
+    for (let i = 0; i < pairs.length; i += RENAME_COPY_CONCURRENCY) {
+      const batch = pairs.slice(i, i + RENAME_COPY_CONCURRENCY);
+      await Promise.all(batch.map(({ src, dest }) => client.copy(dest, src)));
+      onDirectoryProgress?.({ phase: 'copy', done: Math.min(i + batch.length, total), total });
+    }
+
+    // 源 Key 已全部复制后再删,避免先删导致数据不可恢复
+    onDirectoryProgress?.({ phase: 'delete', done: 0, total: keys.length });
+    for (let i = 0; i < keys.length; i += 1000) {
+      const chunk = keys.slice(i, i + 1000);
+      await client.deleteMulti(chunk, { quiet: true });
+      onDirectoryProgress?.({ phase: 'delete', done: Math.min(i + chunk.length, keys.length), total: keys.length });
+    }
+
+    return { newPath: destPrefix };
+  } catch (err) {
+    throw normalizeOSSBrowserError(err);
+  }
 }
 
 /**

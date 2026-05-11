@@ -105,3 +105,12 @@ export interface BreadcrumbItem {
   /** 点击后跳转的目录前缀 */
   prefix: string;
 }
+
+/**
+ * 目录重命名过程中用于 UI 的进度(复制 / 批量删除)
+ */
+export interface RenameDirectoryProgress {
+  phase: 'copy' | 'delete';
+  done: number;
+  total: number;
+}

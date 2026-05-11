@@ -3,12 +3,12 @@
  *
  * 文件浏览器核心组件。
  * 使用 Ant Design Table 展示当前目录下的文件和子目录。
- * 支持单击目录进入下级、单击文件触发下载、右键/操作列删除。
+ * 支持单击目录进入下级、单击文件触发下载、右键/操作列删除与重命名。
  *
  * 设计思路:
  *   - 列配置与渲染逻辑集中在此组件内;
  *   - 文件图标通过 resolveFileIcon 获取;
- *   - 行为(导航、下载、删除)通过 props 的回调上报给父组件。
+ *   - 行为(导航、下载、删除、重命名)通过 props 的回调上报给父组件。
  */
 
 import React, { useCallback } from 'react';
@@ -16,6 +16,7 @@ import { Table, Button, Popconfirm, Typography, Empty, Tooltip } from 'antd';
 import {
   DeleteOutlined,
   DownloadOutlined,
+  FormOutlined,
   LinkOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -43,6 +44,8 @@ export interface FileTableProps {
   onDownload: (entry: FileEntry) => void;
   /** 删除条目 */
   onDelete: (entry: FileEntry) => void;
+  /** 重命名条目:打开弹窗或跳转至重命名流程,由父组件实现 */
+  onRename: (entry: FileEntry) => void;
   /** 生成访问链接 */
   onGenerateUrl: (entry: FileEntry) => void;
 }
@@ -57,6 +60,7 @@ export const FileTable: React.FC<FileTableProps> = ({
   onNavigate,
   onDownload,
   onDelete,
+  onRename,
   onGenerateUrl,
 }) => {
   const handleRowClick = useCallback(
@@ -119,7 +123,7 @@ export const FileTable: React.FC<FileTableProps> = ({
     {
       title: '操作',
       key: 'action',
-      width: 116,
+      width: 152,
       align: 'right',
       render: (_: unknown, record: FileEntry) => (
         <div className="file-actions">
@@ -148,6 +152,37 @@ export const FileTable: React.FC<FileTableProps> = ({
                 />
               </Tooltip>
             </>
+          )}
+          {/* 文件与目录均支持重命名;目录在 OSS 侧为批量 copy + deleteMulti,故目录需二次确认 */}
+          {record.type === 'directory' ? (
+            <Popconfirm
+              title="确认重命名该文件夹?"
+              description="通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。"
+              okText="继续"
+              cancelText="取消"
+              onConfirm={() => onRename(record)}
+            >
+              <Tooltip title="重命名">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<FormOutlined />}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              </Tooltip>
+            </Popconfirm>
+          ) : (
+            <Tooltip title="重命名">
+              <Button
+                type="text"
+                size="small"
+                icon={<FormOutlined />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRename(record);
+                }}
+              />
+            </Tooltip>
           )}
           <Popconfirm
             title={

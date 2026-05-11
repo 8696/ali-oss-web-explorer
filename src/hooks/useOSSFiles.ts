@@ -3,7 +3,7 @@
  *
  * 文件浏览器的状态中心:
  *   - 维护当前所在目录(prefix)与对应的文件列表;
- *   - 提供导航(navigate)、刷新(refresh)、删除、新建目录等操作方法;
+ *   - 提供导航(navigate)、刷新(refresh)、删除、新建目录、重命名等操作方法;
  *   - 当 client 变化时自动重置并重新拉取列表。
  *
  * 上传任务由独立的 useUploadTasks Hook 管理,避免单个 Hook 责任过多。
@@ -11,11 +11,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type OSS from 'ali-oss';
-import type { FileEntry } from '@/types/oss';
+import type { FileEntry, RenameDirectoryProgress } from '@/types/oss';
 import {
   createDirectory as svcCreateDirectory,
   deleteEntries as svcDeleteEntries,
   listAllFiles as svcListAllFiles,
+  renameEntry as svcRenameEntry,
 } from '@/services/oss';
 
 /** 从当前浏览器 URL 的 ?dir= 参数中读取目录前缀 */
@@ -68,6 +69,19 @@ export interface UseOSSFilesResult {
   removeEntry: (entry: FileEntry) => Promise<void>;
   /** 批量删除多个文件或目录条目 */
   removeEntries: (entries: FileEntry[]) => Promise<void>;
+  /**
+   * 重命名文件或目录(底层为 OSS copy + delete,见 `services/oss.renameEntry`)
+   *
+   * @param entry 当前列表中的条目
+   * @param newName 新名称(仅最后一段)
+   * @param onDirectoryProgress 目录重命名时上报复制/删除进度,单文件可省略
+   * @returns `newPath` 重命名后的完整路径,供 UI 更新选中行等
+   */
+  renameEntry: (
+    entry: FileEntry,
+    newName: string,
+    onDirectoryProgress?: (p: RenameDirectoryProgress) => void,
+  ) => Promise<{ newPath: string }>;
 }
 
 /**
@@ -215,6 +229,61 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
     [removeEntries],
   );
 
+  /**
+   * 重命名当前列表中的文件或子目录
+   *
+   * 流程:
+   * 1. 递增 `requestTokenRef` 并与删除操作一致地进入 loading,避免与其它列表请求交错时状态错乱;
+   * 2. 调用 `renameEntry` 服务完成 OSS 侧复制与删除;
+   * 3. 若重命名的是「目录」且用户当前正位于该目录或其子路径下(`prefix` 以该目录路径开头),
+   *    必须把 `prefix` 与地址栏 `?dir=` 同步改写为新目录前缀,否则列表 URL 仍指向旧路径会 404 或空列表;
+   * 4. 最后对 `targetPrefix`(可能已是新路径)调用 `loadDirectory` 刷新表格。
+   *
+   * 失败时错误向上抛出,由 App 层 `message.error` 提示(此处不写入 `error` state,避免与列表加载错误重复弹窗)。
+   */
+  const renameEntry = useCallback(
+    async (
+      entry: FileEntry,
+      newName: string,
+      onDirectoryProgress?: (p: RenameDirectoryProgress) => void,
+    ): Promise<{ newPath: string }> => {
+      if (!client) throw new Error('未连接 OSS');
+      // 刷新列表时使用的目录前缀;若发生「目录自映射」,会在下面被替换为新路径
+      let targetPrefix = prefix;
+      // 仅当 entry 为目录时需要判断当前浏览路径是否落在其下,故预先算出带尾斜杠的旧目录前缀
+      const oldDirPrefix =
+        entry.type === 'directory'
+          ? entry.path.endsWith('/')
+            ? entry.path
+            : `${entry.path}/`
+          : null;
+
+      requestTokenRef.current += 1;
+      const currentToken = requestTokenRef.current;
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await svcRenameEntry(client, entry, newName, onDirectoryProgress);
+
+        // 例: 在 `a/b/` 内浏览 `a/b/c/d/` 时把文件夹 `c` 改名为 `x`,前缀应从 `a/b/c/` 变为 `a/b/x/`
+        if (oldDirPrefix && prefix.startsWith(oldDirPrefix)) {
+          const newDirPrefix = result.newPath.endsWith('/') ? result.newPath : `${result.newPath}/`;
+          targetPrefix = newDirPrefix + prefix.slice(oldDirPrefix.length);
+          setPrefix(targetPrefix);
+          pushDirToUrl(targetPrefix);
+        }
+
+        await loadDirectory(client, targetPrefix);
+        return result;
+      } finally {
+        if (currentToken === requestTokenRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [client, prefix, loadDirectory],
+  );
+
   return {
     prefix,
     entries,
@@ -225,5 +294,6 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
     createFolder,
     removeEntry,
     removeEntries,
+    renameEntry,
   };
 }
