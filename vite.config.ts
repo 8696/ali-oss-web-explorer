@@ -7,8 +7,10 @@ import path from 'node:path';
  * - 使用 @vitejs/plugin-react 提供 React Fast Refresh 与 JSX 支持
  * - 通过 alias 将 `@/` 映射到 `src/`，简化模块引用路径
  * - 定义 ali-oss 在浏览器侧运行所需的 Node 兼容性 polyfill
+ * - 生产构建与 preview 使用 base `/m/`，部署后可通过 `/m/index.html` 访问；本地 dev 仍为 `/`
  */
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
+  base: mode === 'production' ? '/m/' : '/',
   plugins: [react()],
   resolve: {
     alias: {
@@ -41,4 +43,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));
