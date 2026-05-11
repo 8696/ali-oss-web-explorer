@@ -36,7 +36,6 @@ const STATUS_TAG_MAP: Record<UploadTask['status'], { color: string; label: strin
   uploading: { color: 'processing', label: '上传中' },
   success: { color: 'success', label: '完成' },
   error: { color: 'error', label: '失败' },
-  canceled: { color: 'warning', label: '已取消' },
 };
 
 export const UploadDrawer: React.FC<UploadDrawerProps> = ({
@@ -48,7 +47,7 @@ export const UploadDrawer: React.FC<UploadDrawerProps> = ({
 }) => {
   // 统计已完成(成功/失败/取消)的任务数
   const completedCount = tasks.filter(
-    (t) => t.status === 'success' || t.status === 'error' || t.status === 'canceled',
+    (t) => t.status === 'success' || t.status === 'error',
   ).length;
 
   return (

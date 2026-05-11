@@ -195,9 +195,13 @@ const AppInner: React.FC = () => {
    */
   const handleCreateFolder = useCallback(
     async (name: string) => {
-      await createFolder(name);
-      message.success(`文件夹「${name}」已创建`);
-      setCreateFolderOpen(false);
+      try {
+        await createFolder(name);
+        message.success(`文件夹「${name}」已创建`);
+        setCreateFolderOpen(false);
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : '创建文件夹失败');
+      }
     },
     [createFolder, message],
   );

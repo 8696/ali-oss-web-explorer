@@ -264,11 +264,14 @@ export async function uploadFile(
  * @returns 带签名的临时 URL
  */
 export function getSignedUrl(client: OSS, objectKey: string, expires = 60): string {
+  const fileName = extractName(objectKey);
+  const encoded = encodeURIComponent(fileName);
+  // RFC 5987: filename* 支持 UTF-8 编码的文件名; filename 作为 ASCII 兜底
+  const fallback = fileName.replace(/[^\x20-\x7e]/g, '_');
   return client.signatureUrl(objectKey, {
     expires,
-    // 强制浏览器下载,而不是直接预览
     response: {
-      'content-disposition': `attachment; filename="${encodeURIComponent(extractName(objectKey))}"`,
+      'content-disposition': `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`,
     },
   });
 }

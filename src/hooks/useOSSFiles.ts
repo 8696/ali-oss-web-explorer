@@ -24,8 +24,8 @@ function readDirFromUrl(): string {
   return dir === '' ? '' : dir.endsWith('/') ? dir : `${dir}/`;
 }
 
-/** 将目录前缀同步写入浏览器 URL（不触发页面跳转） */
-function syncDirToUrl(dir: string) {
+/** 将目录前缀写入浏览器 URL（replace 模式，用于 popstate 回恢复） */
+function replaceDirToUrl(dir: string) {
   const url = new URL(window.location.href);
   if (dir) {
     url.searchParams.set('dir', dir);
@@ -33,6 +33,17 @@ function syncDirToUrl(dir: string) {
     url.searchParams.delete('dir');
   }
   window.history.replaceState(null, '', url);
+}
+
+/** 将目录前缀写入浏览器 URL（push 模式，用于主动导航，可被后退按钮回退） */
+function pushDirToUrl(dir: string) {
+  const url = new URL(window.location.href);
+  if (dir) {
+    url.searchParams.set('dir', dir);
+  } else {
+    url.searchParams.delete('dir');
+  }
+  window.history.pushState(null, '', url);
 }
 
 /**
@@ -130,7 +141,7 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
     const onPopState = () => {
       const dir = readDirFromUrl();
       setPrefix(dir);
-      syncDirToUrl(dir);
+      replaceDirToUrl(dir);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -145,11 +156,8 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
     // 标准化:目录前缀必须以 / 结尾,根目录为空字符串
     const normalized = nextPrefix === '' ? '' : nextPrefix.endsWith('/') ? nextPrefix : `${nextPrefix}/`;
     if (normalized === prefix) return;
-    requestTokenRef.current += 1;
-    setLoading(true);
-    setError(null);
     setPrefix(normalized);
-    syncDirToUrl(normalized);
+    pushDirToUrl(normalized);
   }, [prefix]);
 
   /**

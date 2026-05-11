@@ -63,6 +63,8 @@ export function useOSSClient(config: OSSConfig | null): UseOSSClientResult {
     requestTokenRef.current += 1;
     const currentToken = requestTokenRef.current;
 
+    // 先清除旧 client，避免重连期间仍可操作旧 Bucket
+    setClient(null);
     const next = createOSSClient(config);
     setConnecting(true);
     setError(null);

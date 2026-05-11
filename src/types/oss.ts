@@ -87,8 +87,8 @@ export interface UploadTask {
   objectKey: string;
   /** 上传进度,0 ~ 100 */
   progress: number;
-  /** 状态机:waiting -> uploading -> success / error / canceled */
-  status: 'waiting' | 'uploading' | 'success' | 'error' | 'canceled';
+  /** 状态机:waiting -> uploading -> success / error */
+  status: 'waiting' | 'uploading' | 'success' | 'error';
   /** 错误信息(若有) */
   errorMessage?: string;
   /** ali-oss multipartUpload 返回的 checkpoint,用于断点续传 */

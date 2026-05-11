@@ -156,7 +156,7 @@ export function useUploadTasks(client: OSS | null, options: UseUploadTasksOption
       }
 
       const allDone = batchTasks.every(
-        (task) => task.status === 'success' || task.status === 'error' || task.status === 'canceled',
+        (task) => task.status === 'success' || task.status === 'error',
       );
 
       if (!allDone) {

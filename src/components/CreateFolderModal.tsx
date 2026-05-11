@@ -31,13 +31,20 @@ export const CreateFolderModal: React.FC<CreateFolderModalProps> = ({
    * 提交:调用上层创建目录,成功后关闭并重置表单
    */
   const handleOk = useCallback(async () => {
+    let values: { folderName: string };
     try {
-      const values = await form.validateFields();
+      values = await form.validateFields();
+    } catch {
+      // validateFields 失败时 Ant Design 会自动展示表单错误
+      return;
+    }
+    try {
       setSubmitting(true);
       await onConfirm(values.folderName);
       form.resetFields();
-    } catch {
-      // validateFields 失败时 Ant Design 会自动展示表单错误
+    } catch (err) {
+      // OSS 操作错误向上抛出，由调用方的 catch 统一处理
+      throw err;
     } finally {
       setSubmitting(false);
     }

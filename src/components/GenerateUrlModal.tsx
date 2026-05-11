@@ -44,7 +44,7 @@ export const GenerateUrlModal: React.FC<GenerateUrlModalProps> = ({
     } catch {
       message.error('复制失败，请手动复制');
     }
-  }, [generatedUrl]);
+  }, [generatedUrl, message]);
 
   const handleClose = useCallback(() => {
     setGeneratedUrl('');
