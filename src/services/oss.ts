@@ -10,7 +10,7 @@
  */
 
 import OSS from 'ali-oss';
-import type { OSSConfig, FileEntry, ListFilesResult, RenameDirectoryProgress } from '@/types/oss';
+import type { OSSConfig, FileEntry, ListFilesResult, ObjectAcl, RenameDirectoryProgress } from '@/types/oss';
 import { extractName } from '@/utils/format';
 
 /**
@@ -75,6 +75,53 @@ export async function verifyConnection(client: OSS): Promise<void> {
     },
     {},
   );
+}
+
+/** ali-oss 类型声明未覆盖 getACL/putACL,此处做最小能力断言 */
+type OSSAclCapable = OSS & {
+  getACL(name: string, options?: Record<string, unknown>): Promise<{ acl?: string }>;
+  putACL(name: string, acl: string, options?: Record<string, unknown>): Promise<unknown>;
+};
+
+function ossWithAcl(client: OSS): OSSAclCapable {
+  return client as OSSAclCapable;
+}
+
+const OBJECT_ACL_VALUES: readonly ObjectAcl[] = ['default', 'private', 'public-read', 'public-read-write'];
+
+function parseObjectAcl(raw: string | undefined): ObjectAcl {
+  const v = (raw ?? '').trim().toLowerCase();
+  return OBJECT_ACL_VALUES.includes(v as ObjectAcl) ? (v as ObjectAcl) : 'private';
+}
+
+/**
+ * 读取对象的 ACL 设置
+ *
+ * @param client     OSS 客户端
+ * @param objectKey  对象完整路径(Key)
+ */
+export async function getObjectAcl(client: OSS, objectKey: string): Promise<ObjectAcl> {
+  try {
+    const { acl } = await ossWithAcl(client).getACL(objectKey);
+    return parseObjectAcl(acl);
+  } catch (err) {
+    throw normalizeOSSBrowserError(err);
+  }
+}
+
+/**
+ * 写入对象的 ACL(读写可见性由 RAM / Bucket Policy 与对象 ACL 共同决定)
+ *
+ * @param client     OSS 客户端
+ * @param objectKey  对象完整路径(Key)
+ * @param acl        目标 ACL
+ */
+export async function putObjectAcl(client: OSS, objectKey: string, acl: ObjectAcl): Promise<void> {
+  try {
+    await ossWithAcl(client).putACL(objectKey, acl);
+  } catch (err) {
+    throw normalizeOSSBrowserError(err);
+  }
 }
 
 /**

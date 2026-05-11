@@ -3,7 +3,7 @@
  *
  * 文件浏览器核心组件。
  * 使用 Ant Design Table 展示当前目录下的文件和子目录。
- * 支持单击目录进入下级、单击文件名预览、操作列强制下载、删除与重命名。
+ * 支持单击目录进入下级、单击文件名预览、操作列下载、链接、ACL、删除与重命名。
  *
  * 设计思路:
  *   - 列配置与渲染逻辑集中在此组件内;
@@ -18,6 +18,7 @@ import {
   DownloadOutlined,
   FormOutlined,
   LinkOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { TableRowSelection } from 'antd/es/table/interface';
@@ -50,6 +51,8 @@ export interface FileTableProps {
   onRename: (entry: FileEntry) => void;
   /** 生成访问链接 */
   onGenerateUrl: (entry: FileEntry) => void;
+  /** 查看并修改对象 ACL(仅文件) */
+  onObjectAcl: (entry: FileEntry) => void;
 }
 
 export const FileTable: React.FC<FileTableProps> = ({
@@ -65,6 +68,7 @@ export const FileTable: React.FC<FileTableProps> = ({
   onDelete,
   onRename,
   onGenerateUrl,
+  onObjectAcl,
 }) => {
   const handleRowClick = useCallback(
     (record: FileEntry) => {
@@ -126,7 +130,7 @@ export const FileTable: React.FC<FileTableProps> = ({
     {
       title: '操作',
       key: 'action',
-      width: 152,
+      width: 188,
       align: 'right',
       render: (_: unknown, record: FileEntry) => (
         <div className="file-actions">
@@ -151,6 +155,17 @@ export const FileTable: React.FC<FileTableProps> = ({
                   onClick={(e) => {
                     e.stopPropagation();
                     onGenerateUrl(record);
+                  }}
+                />
+              </Tooltip>
+              <Tooltip title="读写权限">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<SafetyCertificateOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onObjectAcl(record);
                   }}
                 />
               </Tooltip>

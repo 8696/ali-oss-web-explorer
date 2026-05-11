@@ -35,6 +35,13 @@ export interface OSSConfig {
 export type FileEntryType = 'file' | 'directory';
 
 /**
+ * OSS 对象级访问控制,与 GetObjectACL / PutObjectACL 取值一致
+ *
+ * @see https://help.aliyun.com/document_detail/100676.htm
+ */
+export type ObjectAcl = 'default' | 'private' | 'public-read' | 'public-read-write';
+
+/**
  * 文件浏览器中展示的单条记录
  * 同时承载文件和目录两种语义,便于在同一张表格中渲染
  */

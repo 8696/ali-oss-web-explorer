@@ -25,9 +25,10 @@ import { FileTable } from '@/components/FileTable';
 import { UploadDrawer } from '@/components/UploadDrawer';
 import { CreateFolderModal } from '@/components/CreateFolderModal';
 import { GenerateUrlModal } from '@/components/GenerateUrlModal';
+import { ObjectAclModal } from '@/components/ObjectAclModal';
 import { RenameModal } from '@/components/RenameModal';
-import { getSignedAccessUrl, getSignedUrl } from '@/services/oss';
-import type { FileEntry, RenameDirectoryProgress } from '@/types/oss';
+import { getObjectAcl, getSignedAccessUrl, getSignedUrl, putObjectAcl } from '@/services/oss';
+import type { FileEntry, ObjectAcl, RenameDirectoryProgress } from '@/types/oss';
 import { extractName } from '@/utils/format';
 
 const { Header, Content } = Layout;
@@ -84,6 +85,8 @@ const AppInner: React.FC = () => {
   const [renameTarget, setRenameTarget] = useState<FileEntry | null>(null);
   /** 目录重命名时 OSS 复制/删除进度,单文件重命名不使用 */
   const [renameDirProgress, setRenameDirProgress] = useState<RenameDirectoryProgress | null>(null);
+  /** 对象 ACL 弹窗目标(仅文件) */
+  const [objectAclEntry, setObjectAclEntry] = useState<FileEntry | null>(null);
 
   /**
    * 当前目录的文件统计
@@ -243,6 +246,39 @@ const AppInner: React.FC = () => {
   );
 
   /**
+   * 打开对象 ACL 弹窗(仅文件行展示入口)
+   */
+  const handleOpenObjectAcl = useCallback((entry: FileEntry) => {
+    if (entry.type !== 'file') return;
+    setObjectAclEntry(entry);
+  }, []);
+
+  const handleFetchObjectAcl = useCallback(
+    (objectKey: string) => {
+      if (!client) {
+        return Promise.reject(new Error('未连接 OSS'));
+      }
+      return getObjectAcl(client, objectKey);
+    },
+    [client],
+  );
+
+  const handleSaveObjectAcl = useCallback(
+    async (objectKey: string, acl: ObjectAcl) => {
+      if (!client) {
+        throw new Error('未连接 OSS');
+      }
+      await putObjectAcl(client, objectKey, acl);
+      message.success('权限已更新');
+    },
+    [client, message],
+  );
+
+  const handleObjectAclModalCancel = useCallback(() => {
+    setObjectAclEntry(null);
+  }, []);
+
+  /**
    * 打开重命名弹窗并记录目标条目
    */
   const handleOpenRename = useCallback((entry: FileEntry) => {
@@ -396,6 +432,7 @@ const AppInner: React.FC = () => {
             onDelete={handleDelete}
             onRename={handleOpenRename}
             onGenerateUrl={handleGenerateUrl}
+            onObjectAcl={handleOpenObjectAcl}
           />
         </div>
       </Content>
@@ -433,6 +470,14 @@ const AppInner: React.FC = () => {
           setGenerateUrlOpen(false);
           setGenerateUrlEntry(null);
         }}
+      />
+
+      <ObjectAclModal
+        open={!!objectAclEntry}
+        entry={objectAclEntry}
+        onFetchAcl={handleFetchObjectAcl}
+        onSaveAcl={handleSaveObjectAcl}
+        onCancel={handleObjectAclModalCancel}
       />
 
       {/* 单文件/单目录重命名:表单仅收集新名称,OSS 侧见 services/oss.renameEntry */}
