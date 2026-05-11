@@ -3,7 +3,7 @@
  *
  * 文件浏览器核心组件。
  * 使用 Ant Design Table 展示当前目录下的文件和子目录。
- * 支持单击目录进入下级、单击文件触发下载、右键/操作列删除与重命名。
+ * 支持单击目录进入下级、单击文件名预览、操作列强制下载、删除与重命名。
  *
  * 设计思路:
  *   - 列配置与渲染逻辑集中在此组件内;
@@ -40,8 +40,10 @@ export interface FileTableProps {
   onSelectedRowKeysChange: (keys: React.Key[]) => void;
   /** 点击目录,触发导航 */
   onNavigate: (prefix: string) => void;
-  /** 点击文件,触发下载 */
-  onDownload: (entry: FileEntry) => void;
+  /** 点击文件名/行:新标签页预览(或浏览器自行处理) */
+  onPreviewFile: (entry: FileEntry) => void;
+  /** 操作列下载:带 attachment 的签名 URL,强制保存文件 */
+  onDownloadFile: (entry: FileEntry) => void;
   /** 删除条目 */
   onDelete: (entry: FileEntry) => void;
   /** 重命名条目:打开弹窗或跳转至重命名流程,由父组件实现 */
@@ -58,7 +60,8 @@ export const FileTable: React.FC<FileTableProps> = ({
   selectedRowKeys,
   onSelectedRowKeysChange,
   onNavigate,
-  onDownload,
+  onPreviewFile,
+  onDownloadFile,
   onDelete,
   onRename,
   onGenerateUrl,
@@ -69,10 +72,10 @@ export const FileTable: React.FC<FileTableProps> = ({
       if (record.type === 'directory') {
         onNavigate(record.path);
       } else {
-        onDownload(record);
+        onPreviewFile(record);
       }
     },
-    [selectionMode, onNavigate, onDownload],
+    [selectionMode, onNavigate, onPreviewFile],
   );
 
   const columns: ColumnsType<FileEntry> = [
@@ -136,7 +139,7 @@ export const FileTable: React.FC<FileTableProps> = ({
                   icon={<DownloadOutlined />}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onDownload(record);
+                    onDownloadFile(record);
                   }}
                 />
               </Tooltip>

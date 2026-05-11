@@ -26,7 +26,7 @@ import { UploadDrawer } from '@/components/UploadDrawer';
 import { CreateFolderModal } from '@/components/CreateFolderModal';
 import { GenerateUrlModal } from '@/components/GenerateUrlModal';
 import { RenameModal } from '@/components/RenameModal';
-import { getSignedAccessUrl } from '@/services/oss';
+import { getSignedAccessUrl, getSignedUrl } from '@/services/oss';
 import type { FileEntry, RenameDirectoryProgress } from '@/types/oss';
 import { extractName } from '@/utils/format';
 
@@ -141,9 +141,9 @@ const AppInner: React.FC = () => {
   );
 
   /**
-   * 点击文件行:新标签页打开，浏览器能预览的直接展示，不能的自动下载
+   * 点击文件名:新标签页打开，浏览器能预览的直接展示，不能的自动下载
    */
-  const handleDownload = useCallback(
+  const handlePreviewFile = useCallback(
     (entry: FileEntry) => {
       if (!client) return;
       try {
@@ -151,7 +151,24 @@ const AppInner: React.FC = () => {
         window.open(url, '_blank');
       } catch (err) {
         message.error('操作失败');
-        console.error('[handleDownload]', err);
+        console.error('[handlePreviewFile]', err);
+      }
+    },
+    [client, message],
+  );
+
+  /**
+   * 操作列下载:签名 URL 带 Content-Disposition: attachment，与「仅预览」区分开
+   */
+  const handleDownloadFile = useCallback(
+    (entry: FileEntry) => {
+      if (!client) return;
+      try {
+        const url = getSignedUrl(client, entry.path, 600);
+        window.open(url, '_blank');
+      } catch (err) {
+        message.error('下载失败');
+        console.error('[handleDownloadFile]', err);
       }
     },
     [client, message],
@@ -374,7 +391,8 @@ const AppInner: React.FC = () => {
             selectedRowKeys={selectedRowKeys}
             onSelectedRowKeysChange={setSelectedRowKeys}
             onNavigate={navigate}
-            onDownload={handleDownload}
+            onPreviewFile={handlePreviewFile}
+            onDownloadFile={handleDownloadFile}
             onDelete={handleDelete}
             onRename={handleOpenRename}
             onGenerateUrl={handleGenerateUrl}
