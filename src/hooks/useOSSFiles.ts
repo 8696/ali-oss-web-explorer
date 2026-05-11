@@ -10,8 +10,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { message } from 'antd';
 import type OSS from 'ali-oss';
 import type { FileEntry, RenameDirectoryProgress } from '@/types/oss';
+import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
 import {
   createDirectory as svcCreateDirectory,
   deleteEntries as svcDeleteEntries,
@@ -34,6 +36,23 @@ function replaceDirToUrl(dir: string) {
     url.searchParams.delete('dir');
   }
   window.history.replaceState(null, '', url);
+}
+
+/**
+ * 将桶根系统「回收站」目录固定排在列表末尾,其余条目保持 `listAllFiles` 返回顺序
+ * (便于用户扫一眼即可看到回收站入口,且不与业务目录混排)
+ */
+function orderEntriesWithRecycleBinLast(list: FileEntry[]): FileEntry[] {
+  const head: FileEntry[] = [];
+  const tail: FileEntry[] = [];
+  for (const entry of list) {
+    if (isRecycleBinDirectoryEntry(entry)) {
+      tail.push(entry);
+    } else {
+      head.push(entry);
+    }
+  }
+  return [...head, ...tail];
 }
 
 /** 将目录前缀写入浏览器 URL（push 模式，用于主动导航，可被后退按钮回退） */
@@ -65,10 +84,10 @@ export interface UseOSSFilesResult {
   refresh: () => Promise<void>;
   /** 在当前目录下新建子目录 */
   createFolder: (name: string) => Promise<void>;
-  /** 删除一个文件或目录条目 */
-  removeEntry: (entry: FileEntry) => Promise<void>;
+  /** 删除一个文件或目录条目;`backedUp` 表示是否先备份到了回收站 */
+  removeEntry: (entry: FileEntry) => Promise<{ backedUp: boolean }>;
   /** 批量删除多个文件或目录条目 */
-  removeEntries: (entries: FileEntry[]) => Promise<void>;
+  removeEntries: (entries: FileEntry[]) => Promise<{ backedUp: boolean }>;
   /**
    * 重命名文件或目录(底层为 OSS copy + delete,见 `services/oss.renameEntry`)
    *
@@ -118,7 +137,7 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
       try {
         const result = await svcListAllFiles(targetClient, targetPrefix);
         if (currentToken !== requestTokenRef.current) return;
-        setEntries(result.entries);
+        setEntries(orderEntriesWithRecycleBinLast(result.entries));
       } catch (err) {
         if (currentToken !== requestTokenRef.current) return;
         const message = err instanceof Error ? err.message : '加载文件列表失败';
@@ -197,22 +216,33 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
 
   /**
    * 批量删除文件或目录
-   * 成功后仅刷新一次当前目录
+   *
+   * 删除逻辑见 `services/oss.deleteEntries`(含回收站备份与 OSS deleteMulti);
+   * 过程中展示全局 `message.loading`,避免用户误以为卡死。成功后仅刷新一次当前目录。
    */
   const removeEntries = useCallback(
     async (targetEntries: FileEntry[]) => {
       if (!client) throw new Error('未连接 OSS');
-      if (targetEntries.length === 0) return;
+      if (targetEntries.length === 0) {
+        return { backedUp: false };
+      }
       requestTokenRef.current += 1;
       const currentToken = requestTokenRef.current;
       setLoading(true);
       setError(null);
+      const closeDeleting = message.loading(
+        '正在删除（若需备份到「回收站」，对象较多时可能较久）…',
+        0,
+      );
       try {
-        await svcDeleteEntries(client, targetEntries);
+        const result = await svcDeleteEntries(client, targetEntries);
         await loadDirectory(client, prefix);
+        return result;
       } finally {
-        if (currentToken !== requestTokenRef.current) return;
-        setLoading(false);
+        closeDeleting();
+        if (currentToken === requestTokenRef.current) {
+          setLoading(false);
+        }
       }
     },
     [client, prefix, loadDirectory],
@@ -224,7 +254,7 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
    */
   const removeEntry = useCallback(
     async (entry: FileEntry) => {
-      await removeEntries([entry]);
+      return removeEntries([entry]);
     },
     [removeEntries],
   );

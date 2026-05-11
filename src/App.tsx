@@ -27,6 +27,7 @@ import { CreateFolderModal } from '@/components/CreateFolderModal';
 import { GenerateUrlModal } from '@/components/GenerateUrlModal';
 import { ObjectAclModal } from '@/components/ObjectAclModal';
 import { RenameModal } from '@/components/RenameModal';
+import { RECYCLE_BIN_FOLDER, isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
 import { getObjectAcl, getSignedAccessUrl, getSignedUrl, putObjectAcl } from '@/services/oss';
 import type { FileEntry, ObjectAcl, RenameDirectoryProgress } from '@/types/oss';
 import { extractName } from '@/utils/format';
@@ -98,6 +99,10 @@ const AppInner: React.FC = () => {
     return { folderCount, fileCount };
   }, [entries]);
 
+  /**
+   * 当前多选模式下、与 `selectedRowKeys` 对应的完整条目列表
+   * (用于批量删除入参及是否包含目录/系统回收站的判断)
+   */
   const selectedEntries = useMemo(
     () => entries.filter((entry) => selectedRowKeys.includes(entry.key)),
     [entries, selectedRowKeys],
@@ -107,6 +112,16 @@ const AppInner: React.FC = () => {
   const hasDirectorySelection = useMemo(
     () => selectedEntries.some((entry) => entry.type === 'directory'),
     [selectedEntries],
+  );
+
+  /**
+   * 无选中项,或选中项中含桶根「回收站」系统目录时禁用批量删除
+   * (后者在服务端也会被拒绝,UI 侧提前禁用并 Tooltip 说明)
+   */
+  const bulkDeleteDisabled = useMemo(
+    () =>
+      selectedCount === 0 || selectedEntries.some((entry) => isRecycleBinDirectoryEntry(entry)),
+    [selectedCount, selectedEntries],
   );
 
   // ====== 事件处理 ======
@@ -179,35 +194,53 @@ const AppInner: React.FC = () => {
 
   /**
    * 删除文件/目录
+   *
+   * `removeEntry` 在非回收站路径下会先同桶备份到 `回收站/{时间戳}/` 再删;
+   * `backedUp === false` 表示源已在回收站树下,仅直接删除。失败时抛错供表格确认弹窗保持打开。
    */
   const handleDelete = useCallback(
     async (entry: FileEntry) => {
       try {
-        await removeEntry(entry);
+        const { backedUp } = await removeEntry(entry);
         setSelectedRowKeys((currentKeys) => currentKeys.filter((key) => key !== entry.key));
-        message.success(`已删除 ${entry.name}`);
+        message.success(
+          backedUp
+            ? `已备份至「${RECYCLE_BIN_FOLDER}」并删除 ${entry.name}`
+            : `已删除 ${entry.name}`,
+        );
       } catch (err) {
         message.error(err instanceof Error ? err.message : '删除失败');
+        throw err;
       }
     },
     [removeEntry, message],
   );
 
+  /**
+   * 批量删除当前多选项
+   * 成功后清空选择与选择模式;提示文案与单行删除一致区分是否经过回收站备份。
+   */
   const handleBulkDelete = useCallback(async () => {
     if (selectedEntries.length === 0) return;
 
     try {
-      await removeEntries(selectedEntries);
+      const { backedUp } = await removeEntries(selectedEntries);
       setSelectedRowKeys([]);
-      message.success(`已删除 ${selectedEntries.length} 项`);
+      setSelectionMode(false);
+      message.success(
+        backedUp
+          ? `已备份至「${RECYCLE_BIN_FOLDER}」并删除 ${selectedEntries.length} 项`
+          : `已删除 ${selectedEntries.length} 项`,
+      );
     } catch (err) {
       message.error(
         err instanceof Error
           ? err.message
           : '批量删除失败，部分对象可能已删除，请刷新后确认',
       );
+      throw err;
     }
-  }, [removeEntries, selectedEntries, message]);
+  }, [removeEntries, selectedEntries, message, setSelectionMode]);
 
   const handleToggleSelectionMode = useCallback(() => {
     setSelectionMode((currentMode) => {
@@ -400,12 +433,13 @@ const AppInner: React.FC = () => {
           selectionMode={selectionMode}
           selectedCount={selectedCount}
           hasDirectorySelection={hasDirectorySelection}
+          bulkDeleteDisabled={bulkDeleteDisabled}
           onUpload={handleUpload}
           onCreateFolder={() => setCreateFolderOpen(true)}
           onRefresh={() => void refresh()}
           onOpenConfig={() => setConfigOpen(true)}
           onToggleSelectionMode={handleToggleSelectionMode}
-          onBulkDelete={() => void handleBulkDelete()}
+          onBulkDelete={handleBulkDelete}
         />
 
         {connected && (

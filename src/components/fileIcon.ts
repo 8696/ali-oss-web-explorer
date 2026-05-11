@@ -6,6 +6,7 @@
 
 import {
   FolderOutlined,
+  RestOutlined,
   FileImageOutlined,
   FileTextOutlined,
   FilePdfOutlined,
@@ -20,6 +21,7 @@ import {
   FileOutlined,
 } from '@ant-design/icons';
 import type { ComponentType } from 'react';
+import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
 import { guessFileCategory } from '@/utils/format';
 
 /**
@@ -35,11 +37,19 @@ interface IconDescriptor {
 /**
  * 根据文件名或目录标识获取对应的图标组件与颜色
  *
- * @param name      文件名(或目录显示名)
- * @param isFolder  是否为目录;为 true 时直接返回文件夹图标
+ * @param name        文件名(或目录显示名)
+ * @param isFolder    是否为目录;为 true 时直接返回文件夹图标
+ * @param folderPath  目录条目的完整 `path`(仅目录时需要,用于区分桶根「回收站」与深层同名文件夹)
  */
-export function resolveFileIcon(name: string, isFolder: boolean): IconDescriptor {
+export function resolveFileIcon(name: string, isFolder: boolean, folderPath?: string): IconDescriptor {
   if (isFolder) {
+    // 桶根「回收站」使用垃圾桶图标;深层 `.../回收站/` 仍为普通文件夹样式
+    if (
+      folderPath !== undefined &&
+      isRecycleBinDirectoryEntry({ type: 'directory', name, path: folderPath })
+    ) {
+      return { Component: RestOutlined, color: '#6d7d8c' };
+    }
     return { Component: FolderOutlined, color: '#b38757' };
   }
   const category = guessFileCategory(name);

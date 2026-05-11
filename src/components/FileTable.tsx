@@ -5,13 +5,17 @@
  * 使用 Ant Design Table 展示当前目录下的文件和子目录。
  * 支持单击目录进入下级、单击文件名预览、操作列下载、链接、ACL、删除与重命名。
  *
+ * 回收站相关:
+ *   - 桶根系统目录「回收站」不可重命名、不可删除、多选时不可勾选;
+ *   - 单行删除同样经 {@link DeleteConfirmModal} 确认,与工具栏批量删除交互一致。
+ *
  * 设计思路:
  *   - 列配置与渲染逻辑集中在此组件内;
  *   - 文件图标通过 resolveFileIcon 获取;
  *   - 行为(导航、下载、删除、重命名)通过 props 的回调上报给父组件。
  */
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import { Table, Button, Popconfirm, Typography, Empty, Tooltip } from 'antd';
 import {
   DeleteOutlined,
@@ -25,6 +29,8 @@ import type { TableRowSelection } from 'antd/es/table/interface';
 import type { FileEntry } from '@/types/oss';
 import { formatDateTime, formatFileSize } from '@/utils/format';
 import { resolveFileIcon } from '@/components/fileIcon';
+import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
+import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
 
 export interface FileTableProps {
   /** 文件与目录列表 */
@@ -70,6 +76,9 @@ export const FileTable: React.FC<FileTableProps> = ({
   onGenerateUrl,
   onObjectAcl,
 }) => {
+  /** 待确认删除的条目;非 null 时打开 {@link DeleteConfirmModal} */
+  const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+
   const handleRowClick = useCallback(
     (record: FileEntry) => {
       if (selectionMode) return;
@@ -90,7 +99,7 @@ export const FileTable: React.FC<FileTableProps> = ({
       ellipsis: true,
       render: (name: string, record: FileEntry) => {
         const isFolder = record.type === 'directory';
-        const { Component, color } = resolveFileIcon(name, isFolder);
+        const { Component, color } = resolveFileIcon(name, isFolder, isFolder ? record.path : undefined);
         return (
           <span
             className="file-row-trigger"
@@ -132,7 +141,10 @@ export const FileTable: React.FC<FileTableProps> = ({
       key: 'action',
       width: 188,
       align: 'right',
-      render: (_: unknown, record: FileEntry) => (
+      render: (_: unknown, record: FileEntry) => {
+        // 仅桶根「回收站」目录加锁;深层同名普通文件夹不受影响
+        const recycleBinLocked = isRecycleBinDirectoryEntry(record);
+        return (
         <div className="file-actions">
           {record.type === 'file' && (
             <>
@@ -173,22 +185,30 @@ export const FileTable: React.FC<FileTableProps> = ({
           )}
           {/* 文件与目录均支持重命名;目录在 OSS 侧为批量 copy + deleteMulti,故目录需二次确认 */}
           {record.type === 'directory' ? (
-            <Popconfirm
-              title="确认重命名该文件夹?"
-              description="通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。"
-              okText="继续"
-              cancelText="取消"
-              onConfirm={() => onRename(record)}
-            >
-              <Tooltip title="重命名">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<FormOutlined />}
-                  onClick={(e) => e.stopPropagation()}
-                />
+            recycleBinLocked ? (
+              <Tooltip title="「回收站」为系统目录，不可重命名">
+                <span className="inline-block" onClick={(e) => e.stopPropagation()}>
+                  <Button type="text" size="small" icon={<FormOutlined />} disabled />
+                </span>
               </Tooltip>
-            </Popconfirm>
+            ) : (
+              <Popconfirm
+                title="确认重命名该文件夹?"
+                description="通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。"
+                okText="继续"
+                cancelText="取消"
+                onConfirm={() => onRename(record)}
+              >
+                <Tooltip title="重命名">
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<FormOutlined />}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </Tooltip>
+              </Popconfirm>
+            )
           ) : (
             <Tooltip title="重命名">
               <Button
@@ -202,40 +222,67 @@ export const FileTable: React.FC<FileTableProps> = ({
               />
             </Tooltip>
           )}
-          <Popconfirm
-            title={
-              record.type === 'directory'
-                ? `确定删除文件夹「${record.name}」及其全部内容?`
-                : `确定删除「${record.name}」?`
-            }
-            onConfirm={() => onDelete(record)}
-            okText="删除"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-          >
+          {recycleBinLocked ? (
+            <Tooltip title="「回收站」为系统目录，不可删除">
+              <span className="inline-block" onClick={(e) => e.stopPropagation()}>
+                <Button type="text" size="small" danger icon={<DeleteOutlined />} disabled />
+              </span>
+            </Tooltip>
+          ) : (
             <Tooltip title="删除">
               <Button
                 type="text"
                 size="small"
                 danger
                 icon={<DeleteOutlined />}
-                onClick={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleteTarget(record);
+                }}
               />
             </Tooltip>
-          </Popconfirm>
+          )}
         </div>
-      ),
+        );
+      },
     },
   ];
 
+  /** 多选模式下为表格启用行选择;系统「回收站」行禁止勾选,与批量删除禁用规则一致 */
   const rowSelection: TableRowSelection<FileEntry> | undefined = selectionMode
     ? {
       selectedRowKeys,
       onChange: (nextSelectedRowKeys) => onSelectedRowKeysChange(nextSelectedRowKeys),
+      getCheckboxProps: (record) =>
+        isRecycleBinDirectoryEntry(record)
+          ? { disabled: true, title: '「回收站」系统文件夹不可勾选删除' }
+          : {},
     }
     : undefined;
 
   return (
+    <>
+      <DeleteConfirmModal
+        open={deleteTarget !== null}
+        title={
+          deleteTarget
+            ? deleteTarget.type === 'directory'
+              ? `将删除文件夹「${deleteTarget.name}」及其全部内容。`
+              : `将删除文件「${deleteTarget.name}」。`
+            : ''
+        }
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          try {
+            await onDelete(deleteTarget);
+            setDeleteTarget(null);
+          } catch (err) {
+            console.error('[FileTable] 删除确认失败', err);
+            /* 错误提示由 App.handleDelete 负责 */
+          }
+        }}
+      />
     <Table<FileEntry>
       dataSource={entries}
       columns={columns}
@@ -261,6 +308,7 @@ export const FileTable: React.FC<FileTableProps> = ({
         ),
       }}
     />
+    </>
   );
 };
 

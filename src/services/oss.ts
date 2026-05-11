@@ -10,8 +10,23 @@
  */
 
 import OSS from 'ali-oss';
+import {
+  RECYCLE_BIN_FOLDER,
+  ROOT_RECYCLE_BIN_PREFIX,
+  isObjectKeyUnderRecycleBin,
+  isRecycleBinDirectoryEntry,
+} from '@/constants/recycleBin';
 import type { OSSConfig, FileEntry, ListFilesResult, ObjectAcl, RenameDirectoryProgress } from '@/types/oss';
 import { extractName } from '@/utils/format';
+
+/** 自 `constants/recycleBin` 再导出,便于外部仅从 `services/oss` 引用 OSS 与回收站约定 */
+export {
+  RECYCLE_BIN_FOLDER,
+  ROOT_RECYCLE_BIN_PREFIX,
+  isObjectKeyUnderRecycleBin,
+  isRecycleBinDirectoryEntry,
+  normalizeDirectoryPrefix,
+} from '@/constants/recycleBin';
 
 /**
  * 用于上传时回调进度的函数签名
@@ -503,6 +518,106 @@ async function assertDirectoryDestinationFree(client: OSS, dirPrefix: string): P
  */
 const RENAME_COPY_CONCURRENCY = 8;
 
+/**
+ * 生成本次删除会话在回收站下的目录前缀,形如 `回收站/20260111153045123/`
+ * 为本地时间 `YYYYMMDDHHmmss` 后接 3 位毫秒(共 19 位数字),无额外随机段。
+ */
+function buildRecycleSessionPrefix(): string {
+  const d = new Date();
+  const z = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}${String(d.getMilliseconds()).padStart(3, '0')}`;
+  return `${RECYCLE_BIN_FOLDER}/${stamp}/`;
+}
+
+/**
+ * 分页列举某前缀下的全部对象 Key(prefix 须以 `/` 结尾以表示目录树)
+ */
+async function listAllObjectKeysWithPrefix(client: OSS, prefixWithSlash: string): Promise<string[]> {
+  const keys: string[] = [];
+  let marker: string | undefined;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const res = await client.list(
+      {
+        prefix: prefixWithSlash,
+        'max-keys': 1000,
+        marker,
+      },
+      {},
+    );
+    for (const obj of res.objects ?? []) {
+      keys.push(obj.name);
+    }
+    if (!res.isTruncated) break;
+    marker = res.nextMarker;
+  }
+  return keys;
+}
+
+/**
+ * 以固定并发度分批执行同桶 `copy(目标, 源)`,避免浏览器侧同时挂起过多请求
+ *
+ * @param onProgress 每批完成后回调 `(已完成条数, 总条数)`;用于删除前备份进度展示
+ */
+async function copyObjectPairsConcurrent(
+  client: OSS,
+  pairs: { src: string; dest: string }[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<void> {
+  const total = pairs.length;
+  for (let i = 0; i < pairs.length; i += RENAME_COPY_CONCURRENCY) {
+    const batch = pairs.slice(i, i + RENAME_COPY_CONCURRENCY);
+    await Promise.all(batch.map(({ src, dest }) => client.copy(dest, src)));
+    onProgress?.(Math.min(i + batch.length, total), total);
+  }
+}
+
+/**
+ * 将某目录前缀下的整棵对象树备份到回收站会话目录下
+ *
+ * 目标 Key 规则: `sessionRoot` + **源对象的完整 Key**(含原前缀),从而在回收站内还原原路径层级。
+ * 若列举结果为空但 `head(oldPrefix)` 存在,视为仅有目录占位对象(0 字节),单独 copy 该 Key。
+ */
+async function copyDirectoryTreeIntoRecycleSession(
+  client: OSS,
+  directoryPath: string,
+  sessionRoot: string,
+  onBackupCopyProgress?: (done: number, total: number) => void,
+): Promise<void> {
+  const oldPrefix = directoryPath.endsWith('/') ? directoryPath : `${directoryPath}/`;
+  const keys = await listAllObjectKeysWithPrefix(client, oldPrefix);
+
+  if (keys.length === 0) {
+    try {
+      await client.head(oldPrefix);
+    } catch (err: unknown) {
+      const e = err as { status?: number; code?: string };
+      if (e?.status === 404 || e?.code === 'NoSuchKey') {
+        return;
+      }
+      throw err instanceof Error ? err : new Error('OSS 操作失败');
+    }
+    // 空目录树:仅备份「目录占位」这一条,与 createDirectory 写入的 0 字节对象一致
+    onBackupCopyProgress?.(0, 1);
+    await client.copy(`${sessionRoot}${oldPrefix}`, oldPrefix);
+    onBackupCopyProgress?.(1, 1);
+    return;
+  }
+
+  const pairs = keys.map((key) => ({ src: key, dest: `${sessionRoot}${key}` }));
+  onBackupCopyProgress?.(0, pairs.length);
+  await copyObjectPairsConcurrent(client, pairs, onBackupCopyProgress);
+}
+
+/**
+ * 将单个文件复制到回收站会话目录下
+ *
+ * 目标 Key = `sessionRoot` + `fileKey`,与目录树备份规则一致,便于在回收站中按原路径浏览。
+ */
+async function copyFileIntoRecycleSession(client: OSS, fileKey: string, sessionRoot: string): Promise<void> {
+  await client.copy(`${sessionRoot}${fileKey}`, fileKey);
+}
+
 export async function renameEntry(
   client: OSS,
   entry: FileEntry,
@@ -512,6 +627,10 @@ export async function renameEntry(
   const base = sanitizeEntryBaseName(newName);
   if (base === entry.name) {
     throw new Error('名称未改变');
+  }
+
+  if (isRecycleBinDirectoryEntry(entry)) {
+    throw new Error(`「${RECYCLE_BIN_FOLDER}」为桶根系统目录，无法重命名`);
   }
 
   const parent = parentPrefixFromEntry(entry);
@@ -608,27 +727,109 @@ export async function deleteFile(client: OSS, objectKey: string): Promise<void> 
 
 /**
  * 批量删除多个条目
+ *
+ * 删除前将「回收站」目录以外的对象完整备份到 `回收站/{YYYYMMDDHHmmss + 三位毫秒}/{原对象完整路径}`(同桶 copy);
+ * 已在 `回收站/` 下的对象不再次备份,直接删除。全部备份(若有)成功后再按目录递归删除、再批量删除文件 Key。
+ *
+ * 执行顺序(保证备份完整后再删源):
+ * 1. 按路径去重,并拒绝删除桶根系统「回收站」目录本身;
+ * 2. 对需备份的**每个选中目录**整树 copy 到同一会话前缀下(懒创建 `sessionRoot`);
+ * 3. 对需备份的**每个选中文件**单独 copy,但若该文件路径已落在某个**选中目录**之下则跳过
+ *    (避免目录树备份与单文件备份重复写入同一源对象);
+ * 4. `deleteDirectory` 递归删各选中目录;`deleteMulti` 分批删选中文件。
+ *
  * @param client OSS 客户端
  * @param entries 目标条目列表
+ * @param options.onBackupCopyProgress 可选,备份 copy 进度(已完成条数/总条数)
+ * @returns `backedUp` 为 true 表示本次至少执行过一次回收站备份复制
  */
-export async function deleteEntries(client: OSS, entries: FileEntry[]): Promise<void> {
-  const dedupedEntries = Array.from(new Map(entries.map((entry) => [entry.path, entry])).values());
-  const directoryPaths = dedupedEntries
-    .filter((entry) => entry.type === 'directory')
-    .map((entry) => entry.path);
-  const fileKeys = dedupedEntries
-    .filter((entry) => entry.type === 'file')
-    .map((entry) => entry.path);
-
-  for (const directoryPath of directoryPaths) {
-    await deleteDirectory(client, directoryPath);
-  }
-
-  for (let index = 0; index < fileKeys.length; index += 1000) {
-    const chunk = fileKeys.slice(index, index + 1000);
-    if (chunk.length > 0) {
-      await client.deleteMulti(chunk, { quiet: true });
+export async function deleteEntries(
+  client: OSS,
+  entries: FileEntry[],
+  options?: { onBackupCopyProgress?: (done: number, total: number) => void },
+): Promise<{ backedUp: boolean }> {
+  const onBackupCopyProgress = options?.onBackupCopyProgress;
+  try {
+    // 同一 path 只处理一次(例如表格与逻辑层重复传入)
+    const dedupedEntries = Array.from(new Map(entries.map((entry) => [entry.path, entry])).values());
+    if (dedupedEntries.some((entry) => isRecycleBinDirectoryEntry(entry))) {
+      throw new Error(
+        `禁止删除桶根系统目录「${RECYCLE_BIN_FOLDER}」。请进入该目录后管理或删除其中的备份会话子文件夹。`,
+      );
     }
+    const directoryPaths = dedupedEntries
+      .filter((entry) => entry.type === 'directory')
+      .map((entry) => entry.path);
+    const fileKeys = dedupedEntries
+      .filter((entry) => entry.type === 'file')
+      .map((entry) => entry.path);
+
+    const directoryPrefixes = directoryPaths.map((p) => (p.endsWith('/') ? p : `${p}/`));
+    /** 本批删除共用的回收站子前缀;仅当存在至少一次「需备份」的 copy 时才创建 */
+    let sessionRoot: string | null = null;
+    let backedUp = false;
+
+    const ensureSessionRoot = (): string => {
+      if (!sessionRoot) {
+        sessionRoot = buildRecycleSessionPrefix();
+      }
+      return sessionRoot;
+    };
+
+    // 阶段 A: 备份选中目录(回收站内的目录树不再向回收站二次备份)
+    for (const directoryPath of directoryPaths) {
+      const dirPrefix = directoryPath.endsWith('/') ? directoryPath : `${directoryPath}/`;
+      if (isObjectKeyUnderRecycleBin(dirPrefix)) {
+        continue;
+      }
+      await copyDirectoryTreeIntoRecycleSession(
+        client,
+        directoryPath,
+        ensureSessionRoot(),
+        onBackupCopyProgress,
+      );
+      backedUp = true;
+    }
+
+    // 阶段 B: 备份选中文件(跳过已含于选中目录树中的文件,以及已在回收站下的文件)
+    for (const fileKey of fileKeys) {
+      const underSelectedDir = directoryPrefixes.some((dirPrefix) => fileKey.startsWith(dirPrefix));
+      if (underSelectedDir) {
+        continue;
+      }
+      if (isObjectKeyUnderRecycleBin(fileKey)) {
+        continue;
+      }
+      await copyFileIntoRecycleSession(client, fileKey, ensureSessionRoot());
+      backedUp = true;
+    }
+
+    // 阶段 C/D: 先删目录再删文件;目录内对象已在上一阶段随 deleteDirectory 清空
+    for (const directoryPath of directoryPaths) {
+      const dirPrefix = directoryPath.endsWith('/') ? directoryPath : `${directoryPath}/`;
+      await deleteDirectory(client, dirPrefix);
+    }
+
+    for (let index = 0; index < fileKeys.length; index += 1000) {
+      const chunk = fileKeys.slice(index, index + 1000);
+      if (chunk.length > 0) {
+        await client.deleteMulti(chunk, { quiet: true });
+      }
+    }
+
+    return { backedUp };
+  } catch (err) {
+    const e = normalizeOSSBrowserError(err);
+    const m = e.message;
+    const hint = '含回收站备份在内为多步操作，失败时可能已部分完成，请刷新列表核对。';
+    // 已带补充说明或 CORS 专用提示的错误,避免重复拼接括号后缀
+    if (
+      /已部分完成|请刷新列表核对/.test(m) ||
+      /CORS|Expose-Headers|跨域设置/.test(m)
+    ) {
+      throw e;
+    }
+    throw new Error(`${m}（${hint}）`);
   }
 }
 
@@ -646,6 +847,9 @@ export async function deleteEntries(client: OSS, entries: FileEntry[]): Promise<
 export async function deleteDirectory(client: OSS, prefix: string): Promise<void> {
   if (!prefix.endsWith('/')) {
     throw new Error('目录前缀必须以 "/" 结尾');
+  }
+  if (prefix === ROOT_RECYCLE_BIN_PREFIX) {
+    throw new Error(`禁止递归删除桶根系统目录「${RECYCLE_BIN_FOLDER}」。`);
   }
   let nextMarker: string | undefined = undefined;
   // 持续翻页直到列举完所有对象
