@@ -82,6 +82,7 @@ body {
   justify-content: center;
 }
 
+/* 列表卡片勿对 .modern-file-table 使用 overflow:hidden，会阻断表头 sticky */
 .toolbar-panel,
 .breadcrumbs-panel,
 .modern-file-table {
@@ -178,10 +179,6 @@ body {
   font-weight: 600;
 }
 
-.modern-file-table {
-  overflow: hidden;
-}
-
 .modern-file-table .ant-spin-nested-loading,
 .modern-file-table .ant-spin-container,
 .modern-file-table .ant-table,
@@ -189,9 +186,30 @@ body {
   background: transparent;
 }
 
+/* 虚拟列表：占满 flex 剩余高度，便于 ResizeObserver 得到正确 clientHeight */
+.file-table-virtual .ant-spin-nested-loading,
+.file-table-virtual .ant-spin-container {
+  height: 100%;
+  min-height: 0;
+}
+
+.file-table-virtual .ant-table-wrapper {
+  height: 100%;
+  min-height: 0;
+}
+
 .modern-file-table .ant-table-container {
   border-inline-start: none !important;
   border-top: none !important;
+}
+
+/* 批量选择：固定选择列宽度（虚拟表格下否则易被 table 布局拉得过宽） */
+.modern-file-table .ant-table-selection-column {
+  width: 48px !important;
+  min-width: 48px !important;
+  max-width: 48px !important;
+  padding-inline: 8px !important;
+  text-align: center;
 }
 
 .modern-file-table .ant-table-thead > tr > th {

@@ -15,7 +15,7 @@
  *   - 行为(导航、下载、删除、重命名)通过 props 的回调上报给父组件。
  */
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { Table, Button, Typography, Empty, Dropdown, App as AntdApp } from 'antd';
 import type { MenuProps } from 'antd';
 import {
@@ -35,6 +35,9 @@ import { formatDateTime, formatFileSize } from '@/utils/format';
 import { resolveFileIcon } from '@/components/fileIcon';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
+
+/** 虚拟列表 tbody 最小滚动高度(px)，低于此值体验较差 */
+const VIRTUAL_BODY_MIN = 160;
 
 export interface FileTableProps {
   /** 文件与目录列表 */
@@ -86,6 +89,10 @@ export const FileTable: React.FC<FileTableProps> = ({
   onCopyEntry,
   onCutEntry,
 }) => {
+  const tableWrapRef = useRef<HTMLDivElement>(null);
+  /** 传给 Table scroll.y，决定虚拟列表可视区域高度 */
+  const [bodyScrollY, setBodyScrollY] = useState(VIRTUAL_BODY_MIN);
+
   /** 待确认删除的条目;非 null 时打开 {@link DeleteConfirmModal} */
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
   /** 全局 Modal API,用于目录重命名/剪切的二次确认 */
@@ -307,6 +314,8 @@ export const FileTable: React.FC<FileTableProps> = ({
   /** 多选模式下为表格启用行选择;系统「回收站」行禁止勾选,与批量删除禁用规则一致 */
   const rowSelection: TableRowSelection<FileEntry> | undefined = selectionMode
     ? {
+      columnWidth: 48,
+      align: 'center',
       selectedRowKeys,
       onChange: (nextSelectedRowKeys) => onSelectedRowKeysChange(nextSelectedRowKeys),
       getCheckboxProps: (record) =>
@@ -315,6 +324,32 @@ export const FileTable: React.FC<FileTableProps> = ({
           : {},
     }
     : undefined;
+
+  const measureBodyScrollY = useCallback(() => {
+    const wrap = tableWrapRef.current;
+    if (!wrap) return;
+    const thead = wrap.querySelector('.ant-table-thead');
+    const theadH = thead?.getBoundingClientRect().height ?? 0;
+    const headH = theadH > 0 ? theadH : 48;
+    const next = Math.floor(wrap.clientHeight - headH);
+    const clamped = Math.max(VIRTUAL_BODY_MIN, next);
+    setBodyScrollY((prev) => (prev === clamped ? prev : clamped));
+  }, []);
+
+  useLayoutEffect(() => {
+    const wrap = tableWrapRef.current;
+    if (!wrap) return;
+    measureBodyScrollY();
+    const ro = new ResizeObserver(() => {
+      requestAnimationFrame(measureBodyScrollY);
+    });
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [measureBodyScrollY]);
+
+  useLayoutEffect(() => {
+    requestAnimationFrame(measureBodyScrollY);
+  }, [entries.length, loading, selectionMode, connected, measureBodyScrollY]);
 
   return (
     <>
@@ -339,31 +374,38 @@ export const FileTable: React.FC<FileTableProps> = ({
           }
         }}
       />
-    <Table<FileEntry>
-      dataSource={entries}
-      columns={columns}
-      rowKey="key"
-      rowSelection={rowSelection}
-      loading={loading}
-      size="middle"
-      pagination={false}
-      className="modern-file-table flex-1"
-      locale={{
-        emptyText: connected ? (
-          <Empty description="当前目录为空" />
-        ) : (
-          <Empty
-            description={
-              <Typography.Text type="secondary">
-                请先点击右上角
-                <SettingOutlined className="mx-1" />
-                配置 OSS 连接
-              </Typography.Text>
-            }
-          />
-        ),
-      }}
-    />
+    <div
+      ref={tableWrapRef}
+      className="modern-file-table file-table-virtual flex min-h-0 flex-1 flex-col"
+    >
+      <Table<FileEntry>
+        dataSource={entries}
+        columns={columns}
+        rowKey="key"
+        rowSelection={rowSelection}
+        loading={loading}
+        size="middle"
+        pagination={false}
+        virtual
+        scroll={{ y: bodyScrollY }}
+        className="min-h-0 flex-1"
+        locale={{
+          emptyText: connected ? (
+            <Empty description="当前目录为空" />
+          ) : (
+            <Empty
+              description={
+                <Typography.Text type="secondary">
+                  请先点击右上角
+                  <SettingOutlined className="mx-1" />
+                  配置 OSS 连接
+                </Typography.Text>
+              }
+            />
+          ),
+        }}
+      />
+    </div>
     </>
   );
 };
