@@ -306,16 +306,16 @@ body {
 }
 
 .oss-drawer .ant-alert,
-.upload-drawer .ant-tag,
 .upload-drawer .ant-progress {
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
-.upload-task-card {
-  border: 1px solid #f5efe5;
-  border-radius: 16px;
-  background: rgba(252, 247, 239, 0.5);
-  padding: 12px 14px;
+.upload-drawer-tabs .ant-tabs-nav {
+  margin-bottom: 8px;
+}
+
+.upload-drawer-tabs .ant-tabs-tab {
+  padding: 8px 10px;
 }
 
 .oss-modal .ant-modal-content {
