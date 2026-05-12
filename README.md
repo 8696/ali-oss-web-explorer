@@ -95,9 +95,9 @@
     ├── index.css              # Tailwind 入口 + 全局布局 / 表格 / 弹窗等样式
     ├── vite-env.d.ts
     ├── components/
-    │   ├── Breadcrumbs.tsx    # 面包屑与目录统计
-    │   ├── ConfigDrawer.tsx # OSS 连接配置
-    │   ├── CreateFolderModal.tsx
+    │   ├── Breadcrumbs.tsx     # 面包屑与目录统计
+    │   ├── ConfigModal.tsx     # OSS 连接配置弹窗
+    │   ├── CreateFolderModal.tsx    # 新建文件夹弹窗
     │   ├── DeleteConfirmModal.tsx   # 批量/单行删除二次确认（口令）
     │   ├── FileTable.tsx            # 文件列表、虚拟滚动、行内操作与复制剪切入口
     │   ├── GenerateUrlModal.tsx     # 生成签名链接

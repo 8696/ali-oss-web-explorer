@@ -18,7 +18,7 @@ import { useOSSConfig } from '@/hooks/useOSSConfig';
 import { useOSSClient } from '@/hooks/useOSSClient';
 import { useOSSFiles } from '@/hooks/useOSSFiles';
 import { useUploadTasks } from '@/hooks/useUploadTasks';
-import { ConfigDrawer } from '@/components/ConfigDrawer';
+import { ConfigModal } from '@/components/ConfigModal';
 import { Breadcrumbs } from '@/components/Breadcrumbs';
 import { Toolbar } from '@/components/Toolbar';
 import { FileTable } from '@/components/FileTable';
@@ -92,7 +92,14 @@ const AppInner: React.FC = () => {
   });
 
   // ====== UI 开关状态 ======
+  /**
+   * 已连接时由 `configOpen` 控制。未连接时仅「无配置」或「已有校验错误」时强制打开;
+   * 有本地配置且校验尚未返回时 connectError 仍为 null,不会误开(避免刷新闪一下)。
+   * useOSSClient 在发起校验时不再预先清空 error,失败后重试也不会闪。
+   */
   const [configOpen, setConfigOpen] = useState(false);
+  const configModalOpen =
+    configOpen || (!connected && (!config || Boolean(connectError)));
   const [uploadOpen, setUploadOpen] = useState(false);
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -619,8 +626,8 @@ const AppInner: React.FC = () => {
         </div>
       </Content>
 
-      <ConfigDrawer
-        open={configOpen}
+      <ConfigModal
+        open={configModalOpen}
         onClose={() => setConfigOpen(false)}
         config={config}
         connecting={connecting}

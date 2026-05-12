@@ -1,18 +1,18 @@
 /**
- * ConfigDrawer
+ * ConfigModal
  *
- * OSS 连接配置抽屉面板,从右侧滑入。
+ * OSS 连接配置弹窗。
  * 用户在这里填写 AccessKey、Bucket、Region 等参数,点击"连接"后生效。
  * 已连接时显示当前配置摘要,并提供"断开连接"按钮。
+ * 未连接时由上层强制展示且不可关闭,直至连接成功。
  */
 
 import React, { useCallback, useEffect } from 'react';
 import {
   Button,
-  Drawer,
+  Modal,
   Form,
   Input,
-  Select,
   Space,
   Typography,
   Alert,
@@ -23,12 +23,11 @@ import {
   SettingOutlined,
 } from '@ant-design/icons';
 import type { OSSConfig } from '@/types/oss';
-import { OSS_REGIONS } from '@/constants/regions';
 
-export interface ConfigDrawerProps {
-  /** 抽屉是否可见 */
+export interface ConfigModalProps {
+  /** 弹窗是否可见 */
   open: boolean;
-  /** 关闭抽屉 */
+  /** 关闭弹窗(仅已连接时有效;未连接时由 Modal 属性禁用) */
   onClose: () => void;
   /** 当前配置(已连接时有值) */
   config: OSSConfig | null;
@@ -54,7 +53,7 @@ interface ConfigFormValues {
   region: string;
 }
 
-export const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
+export const ConfigModal: React.FC<ConfigModalProps> = ({
   open,
   onClose,
   config,
@@ -92,7 +91,7 @@ export const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
         accessKeyId: values.accessKeyId,
         accessKeySecret: values.accessKeySecret,
         bucket: values.bucket,
-        region: values.region,
+        region: values.region.trim(),
         secure: true,
       });
     },
@@ -100,7 +99,7 @@ export const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
   );
 
   /**
-   * 断开连接后关闭抽屉
+   * 断开连接后清空表单;未连接时弹窗仍保持打开(由上层强制展示)
    */
   const handleDisconnect = useCallback(() => {
     onDisconnect();
@@ -109,19 +108,21 @@ export const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
   }, [onDisconnect, form, onClose]);
 
   return (
-    <Drawer
-      className="oss-drawer"
+    <Modal
+      className="oss-modal oss-config-modal"
       title={
         <Space>
           <SettingOutlined />
           <span>OSS 连接配置</span>
         </Space>
       }
-      placement="right"
       width={420}
       open={open}
-      onClose={onClose}
-      // 已连接时在底部显示"断开"按钮
+      onCancel={connected ? onClose : undefined}
+      closable={connected}
+      maskClosable={connected}
+      keyboard={connected}
+      centered
       footer={
         connected ? (
           <div className="flex justify-end">
@@ -166,7 +167,7 @@ export const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
           name="accessKeyId"
           rules={[{ required: true, message: '请输入 AccessKey ID' }]}
         >
-          <Input placeholder="LTAI5t..." autoComplete="off" />
+          <Input placeholder="请输入 AccessKey ID" autoComplete="off" />
         </Form.Item>
 
         <Form.Item
@@ -182,30 +183,25 @@ export const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
           name="bucket"
           rules={[{ required: true, message: '请输入 Bucket 名称' }]}
         >
-          <Input placeholder="my-bucket" autoComplete="off" />
+          <Input placeholder="请输入 Bucket 名称" autoComplete="off" />
         </Form.Item>
 
         <Form.Item
           label="Region 地域"
           name="region"
-          rules={[{ required: true, message: '请选择 Region' }]}
+          rules={[
+            { required: true, message: '请输入 Region' },
+            { whitespace: true, message: 'Region 不能为空' },
+          ]}
         >
-          <Select
-            showSearch
-            placeholder="选择或搜索地域"
-            optionFilterProp="label"
-            options={OSS_REGIONS}
-            // 允许用户输入自定义 region(某些内网 endpoint)
-            filterOption={(input, option) =>
-              (option?.label as string)?.toLowerCase().includes(input.toLowerCase()) ??
-              (option?.value as string)?.toLowerCase().includes(input.toLowerCase())
-            }
-          />
+          <Input placeholder="请输入 Region" autoComplete="off" />
         </Form.Item>
 
         <Form.Item className="mb-0">
           <Space className="w-full justify-end">
-            <Button onClick={onClose}>取消</Button>
+            {connected ? (
+              <Button onClick={onClose}>取消</Button>
+            ) : null}
             <Button
               type="primary"
               htmlType="submit"
@@ -224,15 +220,8 @@ export const ConfigDrawer: React.FC<ConfigDrawerProps> = ({
         type="secondary"
         style={{ fontSize: 12 }}
       >
-        提示:AccessKey 将保存在浏览器本地存储中。生产环境建议使用 STS 临时凭证。
+        提示:AccessKey 将保存在浏览器本地存储中。
       </Typography.Text>
-      <Typography.Text
-        className="mt-2 block"
-        type="secondary"
-        style={{ fontSize: 12 }}
-      >
-        若需在浏览器中上传大文件,请先在 Bucket 的 CORS 中暴露 Expose-Headers: ETag。
-      </Typography.Text>
-    </Drawer>
+    </Modal>
   );
 };

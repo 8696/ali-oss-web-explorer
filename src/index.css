@@ -324,6 +324,7 @@ body {
 }
 
 .oss-drawer .ant-alert,
+.oss-modal .ant-alert,
 .upload-drawer .ant-progress {
   border-radius: 8px;
 }

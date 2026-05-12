@@ -67,12 +67,13 @@ export function useOSSClient(config: OSSConfig | null): UseOSSClientResult {
     setClient(null);
     const next = createOSSClient(config);
     setConnecting(true);
-    setError(null);
+    // 不在此处清空 error:避免「有本地配置、校验尚未返回」或「失败后重试」时瞬间没有 connectError,连接弹窗误关/误开
 
     verifyConnection(next)
       .then(() => {
         // 若期间又触发了新的连接,丢弃旧结果
         if (currentToken !== requestTokenRef.current) return;
+        setError(null);
         setClient(next);
       })
       .catch((err: unknown) => {
