@@ -6,7 +6,7 @@
  * 支持单击目录进入下级、单击文件名预览、操作列下载、链接、ACL、删除与重命名。
  *
  * 回收站相关:
- *   - 桶根系统目录「回收站」不可重命名、不可删除、多选时不可勾选;
+ *   - 桶根系统目录「回收站」操作列为空(无按钮);多选时不可勾选;
  *   - 单行删除同样经 {@link DeleteConfirmModal} 确认,与工具栏批量删除交互一致。
  *
  * 设计思路:
@@ -16,12 +16,14 @@
  */
 
 import React, { useCallback, useState } from 'react';
-import { Table, Button, Popconfirm, Typography, Empty, Tooltip } from 'antd';
+import { Table, Button, Popconfirm, Typography, Empty, Dropdown } from 'antd';
+import type { MenuProps } from 'antd';
 import {
   DeleteOutlined,
   DownloadOutlined,
   FormOutlined,
   LinkOutlined,
+  MoreOutlined,
   SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -31,6 +33,9 @@ import { formatDateTime, formatFileSize } from '@/utils/format';
 import { resolveFileIcon } from '@/components/fileIcon';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
+
+/** 操作列最多直接展示的按钮数，超出部分收入「更多」下拉菜单 */
+const MAX_INLINE_ACTIONS = 2;
 
 export interface FileTableProps {
   /** 文件与目录列表 */
@@ -139,110 +144,130 @@ export const FileTable: React.FC<FileTableProps> = ({
     {
       title: '操作',
       key: 'action',
-      width: 188,
+      width: 400,
       align: 'right',
       render: (_: unknown, record: FileEntry) => {
-        // 仅桶根「回收站」目录加锁;深层同名普通文件夹不受影响
-        const recycleBinLocked = isRecycleBinDirectoryEntry(record);
+        /* 桶根「回收站」系统目录不展示任何操作按钮 */
+        if (isRecycleBinDirectoryEntry(record)) {
+          return <span className="text-sm text-muted">-</span>;
+        }
+
+        const actionNodes: React.ReactNode[] = [];
+
+        if (record.type === 'file') {
+          actionNodes.push(
+            <Button
+              key="download"
+              type="text"
+              size="small"
+              icon={<DownloadOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                onDownloadFile(record);
+              }}
+            >
+              下载
+            </Button>,
+            <Button
+              key="link"
+              type="text"
+              size="small"
+              icon={<LinkOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                onGenerateUrl(record);
+              }}
+            >
+              生成链接
+            </Button>,
+            <Button
+              key="acl"
+              type="text"
+              size="small"
+              icon={<SafetyCertificateOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                onObjectAcl(record);
+              }}
+            >
+              读写权限
+            </Button>,
+          );
+        }
+
+        /* 文件与目录均支持重命名;目录在 OSS 侧为批量 copy + deleteMulti,故目录需二次确认 */
+        actionNodes.push(
+          record.type === 'directory' ? (
+            <Popconfirm
+              key="rename"
+              title="确认重命名该文件夹?"
+              description="通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。"
+              okText="继续"
+              cancelText="取消"
+              onConfirm={() => onRename(record)}
+            >
+              <Button type="text" size="small" icon={<FormOutlined />} onClick={(e) => e.stopPropagation()}>
+                重命名
+              </Button>
+            </Popconfirm>
+          ) : (
+            <Button
+              key="rename"
+              type="text"
+              size="small"
+              icon={<FormOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRename(record);
+              }}
+            >
+              重命名
+            </Button>
+          ),
+        );
+
+        actionNodes.push(
+          <Button
+            key="delete"
+            type="text"
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteTarget(record);
+            }}
+          >
+            删除
+          </Button>,
+        );
+
+        const inlineActions = actionNodes.slice(0, MAX_INLINE_ACTIONS);
+        const overflowActions = actionNodes.slice(MAX_INLINE_ACTIONS);
+
+        const overflowMenu: MenuProps['items'] =
+          overflowActions.length > 0
+            ? overflowActions.map((node, index) => ({
+                key: `more-${index}`,
+                label: <span onClick={(e) => e.stopPropagation()}>{node}</span>,
+              }))
+            : [];
+
         return (
-        <div className="file-actions">
-          {record.type === 'file' && (
-            <>
-              <Tooltip title="下载">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<DownloadOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDownloadFile(record);
-                  }}
-                />
-              </Tooltip>
-              <Tooltip title="生成链接">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<LinkOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onGenerateUrl(record);
-                  }}
-                />
-              </Tooltip>
-              <Tooltip title="读写权限">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<SafetyCertificateOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onObjectAcl(record);
-                  }}
-                />
-              </Tooltip>
-            </>
-          )}
-          {/* 文件与目录均支持重命名;目录在 OSS 侧为批量 copy + deleteMulti,故目录需二次确认 */}
-          {record.type === 'directory' ? (
-            recycleBinLocked ? (
-              <Tooltip title="「回收站」为系统目录，不可重命名">
-                <span className="inline-block" onClick={(e) => e.stopPropagation()}>
-                  <Button type="text" size="small" icon={<FormOutlined />} disabled />
-                </span>
-              </Tooltip>
-            ) : (
-              <Popconfirm
-                title="确认重命名该文件夹?"
-                description="通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。"
-                okText="继续"
-                cancelText="取消"
-                onConfirm={() => onRename(record)}
+          <div className="file-actions">
+            {inlineActions}
+            {overflowActions.length > 0 && (
+              <Dropdown
+                menu={{ items: overflowMenu }}
+                trigger={['hover']}
+                placement="bottomRight"
               >
-                <Tooltip title="重命名">
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<FormOutlined />}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                </Tooltip>
-              </Popconfirm>
-            )
-          ) : (
-            <Tooltip title="重命名">
-              <Button
-                type="text"
-                size="small"
-                icon={<FormOutlined />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRename(record);
-                }}
-              />
-            </Tooltip>
-          )}
-          {recycleBinLocked ? (
-            <Tooltip title="「回收站」为系统目录，不可删除">
-              <span className="inline-block" onClick={(e) => e.stopPropagation()}>
-                <Button type="text" size="small" danger icon={<DeleteOutlined />} disabled />
-              </span>
-            </Tooltip>
-          ) : (
-            <Tooltip title="删除">
-              <Button
-                type="text"
-                size="small"
-                danger
-                icon={<DeleteOutlined />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDeleteTarget(record);
-                }}
-              />
-            </Tooltip>
-          )}
-        </div>
+                <Button type="text" size="small" icon={<MoreOutlined />} onClick={(e) => e.stopPropagation()}>
+                  更多
+                </Button>
+              </Dropdown>
+            )}
+          </div>
         );
       },
     },
