@@ -16,7 +16,7 @@
  */
 
 import React, { useCallback, useState } from 'react';
-import { Table, Button, Popconfirm, Typography, Empty, Dropdown } from 'antd';
+import { Table, Button, Typography, Empty, Dropdown, App as AntdApp } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   CopyOutlined,
@@ -35,9 +35,6 @@ import { formatDateTime, formatFileSize } from '@/utils/format';
 import { resolveFileIcon } from '@/components/fileIcon';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
-
-/** 操作列最多直接展示的按钮数，超出部分收入「更多」下拉菜单 */
-const MAX_INLINE_ACTIONS = 2;
 
 export interface FileTableProps {
   /** 文件与目录列表 */
@@ -91,6 +88,8 @@ export const FileTable: React.FC<FileTableProps> = ({
 }) => {
   /** 待确认删除的条目;非 null 时打开 {@link DeleteConfirmModal} */
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+  /** 全局 Modal API,用于目录重命名/剪切的二次确认 */
+  const { modal } = AntdApp.useApp();
 
   const handleRowClick = useCallback(
     (record: FileEntry) => {
@@ -152,7 +151,7 @@ export const FileTable: React.FC<FileTableProps> = ({
     {
       title: '操作',
       key: 'action',
-      width: 440,
+      width: 260,
       align: 'right',
       render: (_: unknown, record: FileEntry) => {
         /* 桶根「回收站」系统目录不展示任何操作按钮 */
@@ -160,168 +159,145 @@ export const FileTable: React.FC<FileTableProps> = ({
           return <span className="text-sm text-muted">-</span>;
         }
 
-        const actionNodes: React.ReactNode[] = [];
-
-        if (record.type === 'file') {
-          actionNodes.push(
-            <Button
-              key="download"
-              type="text"
-              size="small"
-              icon={<DownloadOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                onDownloadFile(record);
-              }}
-            >
-              下载
-            </Button>,
-            <Button
-              key="link"
-              type="text"
-              size="small"
-              icon={<LinkOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                onGenerateUrl(record);
-              }}
-            >
-              生成链接
-            </Button>,
-            <Button
-              key="acl"
-              type="text"
-              size="small"
-              icon={<SafetyCertificateOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                onObjectAcl(record);
-              }}
-            >
-              读写权限
-            </Button>,
-          );
-        }
-
-        /* 文件与目录均支持重命名;目录在 OSS 侧为批量 copy + deleteMulti,故目录需二次确认 */
-        actionNodes.push(
-          record.type === 'directory' ? (
-            <Popconfirm
-              key="rename"
-              title="确认重命名该文件夹?"
-              description="通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。"
-              okText="继续"
-              cancelText="取消"
-              onConfirm={() => onRename(record)}
-            >
-              <Button type="text" size="small" icon={<FormOutlined />} onClick={(e) => e.stopPropagation()}>
-                重命名
-              </Button>
-            </Popconfirm>
-          ) : (
-            <Button
-              key="rename"
-              type="text"
-              size="small"
-              icon={<FormOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                onRename(record);
-              }}
-            >
-              重命名
-            </Button>
-          ),
-        );
+        const isDirectory = record.type === 'directory';
 
         /**
-         * 单行「剪切 / 复制」：与工具栏批量逻辑共用剪贴板。
-         * - 目录剪切需二次确认：底层为整树复制再删源，耗时长且失败时可能两侧残留对象。
-         * - `stopPropagation` 避免触发行点击导航；复制无需确认（与文件行为一致）。
+         * 目录重命名底层为「批量 copy + deleteMulti」,非原子操作,需弹框二次确认。
          */
-        actionNodes.push(
-          record.type === 'directory' ? (
-            <Popconfirm
-              key="cut"
-              title="确认剪切该文件夹?"
-              description="将通过复制后删除源路径完成移动；对象较多时耗时较长，中途失败可能在新旧路径下残留部分对象。"
-              okText="继续"
-              cancelText="取消"
-              onConfirm={() => onCutEntry(record)}
-            >
-              <Button type="text" size="small" icon={<ScissorOutlined />} onClick={(e) => e.stopPropagation()}>
-                剪切
-              </Button>
-            </Popconfirm>
-          ) : (
-            <Button
-              key="cut"
-              type="text"
-              size="small"
-              icon={<ScissorOutlined />}
-              onClick={(e) => {
-                e.stopPropagation();
-                onCutEntry(record);
-              }}
-            >
-              剪切
-            </Button>
-          ),
-          <Button
-            key="copy"
-            type="text"
-            size="small"
-            icon={<CopyOutlined />}
-            onClick={(e) => {
-              e.stopPropagation();
-              onCopyEntry(record);
-            }}
-          >
-            复制
-          </Button>,
-        );
+        const triggerDirectoryRename = () => {
+          modal.confirm({
+            title: '确认重命名该文件夹?',
+            content:
+              '通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。',
+            okText: '继续',
+            cancelText: '取消',
+            onOk: () => onRename(record),
+          });
+        };
 
-        actionNodes.push(
-          <Button
-            key="delete"
-            type="text"
-            size="small"
-            danger
-            icon={<DeleteOutlined />}
-            onClick={(e) => {
-              e.stopPropagation();
-              setDeleteTarget(record);
-            }}
-          >
-            删除
-          </Button>,
-        );
+        /**
+         * 构建「更多」下拉菜单项。
+         * - 文件: 读写权限 / 重命名 / 剪切 / 复制 / 删除
+         * - 目录: 剪切 / 复制 / 删除(重命名已固定到外层按钮)
+         * 菜单项自身的 onClick 直接触发动作,无需在 label 内再嵌套按钮。
+         */
+        const overflowItems: MenuProps['items'] = [];
 
-        const inlineActions = actionNodes.slice(0, MAX_INLINE_ACTIONS);
-        const overflowActions = actionNodes.slice(MAX_INLINE_ACTIONS);
+        if (!isDirectory) {
+          overflowItems.push({
+            key: 'acl',
+            icon: <SafetyCertificateOutlined />,
+            label: '读写权限',
+            onClick: ({ domEvent }) => {
+              domEvent.stopPropagation();
+              onObjectAcl(record);
+            },
+          });
+          overflowItems.push({
+            key: 'rename',
+            icon: <FormOutlined />,
+            label: '重命名',
+            onClick: ({ domEvent }) => {
+              domEvent.stopPropagation();
+              onRename(record);
+            },
+          });
+        }
 
-        const overflowMenu: MenuProps['items'] =
-          overflowActions.length > 0
-            ? overflowActions.map((node, index) => ({
-                key: `more-${index}`,
-                label: <span onClick={(e) => e.stopPropagation()}>{node}</span>,
-              }))
-            : [];
+        overflowItems.push({
+          key: 'cut',
+          icon: <ScissorOutlined />,
+          label: '剪切',
+          onClick: ({ domEvent }) => {
+            domEvent.stopPropagation();
+            if (isDirectory) {
+              modal.confirm({
+                title: '确认剪切该文件夹?',
+                content:
+                  '将通过复制后删除源路径完成移动；对象较多时耗时较长，中途失败可能在新旧路径下残留部分对象。',
+                okText: '继续',
+                cancelText: '取消',
+                onOk: () => onCutEntry(record),
+              });
+            } else {
+              onCutEntry(record);
+            }
+          },
+        });
+
+        overflowItems.push({
+          key: 'copy',
+          icon: <CopyOutlined />,
+          label: '复制',
+          onClick: ({ domEvent }) => {
+            domEvent.stopPropagation();
+            onCopyEntry(record);
+          },
+        });
+
+        overflowItems.push({ type: 'divider', key: 'divider-before-delete' });
+
+        overflowItems.push({
+          key: 'delete',
+          icon: <DeleteOutlined />,
+          label: '删除',
+          danger: true,
+          onClick: ({ domEvent }) => {
+            domEvent.stopPropagation();
+            setDeleteTarget(record);
+          },
+        });
 
         return (
           <div className="file-actions">
-            {inlineActions}
-            {overflowActions.length > 0 && (
-              <Dropdown
-                menu={{ items: overflowMenu }}
-                trigger={['hover']}
-                placement="bottomRight"
+            {isDirectory ? (
+              <Button
+                type="text"
+                size="small"
+                icon={<FormOutlined />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  triggerDirectoryRename();
+                }}
               >
-                <Button type="text" size="small" icon={<MoreOutlined />} onClick={(e) => e.stopPropagation()}>
-                  更多
+                重命名
+              </Button>
+            ) : (
+              <>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDownloadFile(record);
+                  }}
+                >
+                  下载
                 </Button>
-              </Dropdown>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<LinkOutlined />}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onGenerateUrl(record);
+                  }}
+                >
+                  生成链接
+                </Button>
+              </>
             )}
+            <Dropdown menu={{ items: overflowItems }} trigger={['hover']} placement="bottomRight">
+              <Button
+                type="text"
+                size="small"
+                icon={<MoreOutlined />}
+                onClick={(e) => e.stopPropagation()}
+              >
+                更多
+              </Button>
+            </Dropdown>
           </div>
         );
       },
