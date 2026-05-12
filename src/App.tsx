@@ -4,11 +4,11 @@
  * 应用根组件,职责:
  *   1. 组装所有 Hooks(Config / Client / Files / Upload);
  *   2. 作为唯一的状态提升层,把各 Hook 的输入输出连接起来;
- *   3. 渲染子组件(Toolbar / Breadcrumbs / FileTable / 各种弹窗,含重命名);
+ *   3. 渲染子组件(Toolbar / Breadcrumbs / FileTable / 各种弹窗,含重命名与粘贴进度);
  *   4. 不包含复杂 UI 逻辑,仅做"接线"工作。
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App as AntdApp, Layout, Button, Badge, ConfigProvider, theme } from 'antd';
 import {
   CloudServerOutlined,
@@ -26,10 +26,17 @@ import { UploadDrawer } from '@/components/UploadDrawer';
 import { CreateFolderModal } from '@/components/CreateFolderModal';
 import { GenerateUrlModal } from '@/components/GenerateUrlModal';
 import { ObjectAclModal } from '@/components/ObjectAclModal';
+import { PasteProgressModal, buildInitialPasteProgress } from '@/components/PasteProgressModal';
 import { RenameModal } from '@/components/RenameModal';
 import { RECYCLE_BIN_FOLDER, isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
 import { getObjectAcl, getSignedAccessUrl, getSignedUrl, putObjectAcl } from '@/services/oss';
-import type { FileEntry, ObjectAcl, RenameDirectoryProgress } from '@/types/oss';
+import type {
+  FileClipboardState,
+  FileEntry,
+  ObjectAcl,
+  PasteProgress,
+  RenameDirectoryProgress,
+} from '@/types/oss';
 import { extractName } from '@/utils/format';
 
 const { Header, Content } = Layout;
@@ -44,7 +51,19 @@ const AppInner: React.FC = () => {
   // ====== 状态管理 ======
   const { config, setConfig, clearConfig } = useOSSConfig();
   const { client, connecting, connected, error: connectError } = useOSSClient(config);
-  const { prefix, entries, loading, error: listError, navigate, refresh, createFolder, removeEntry, removeEntries, renameEntry } = useOSSFiles(client);
+  const {
+    prefix,
+    entries,
+    loading,
+    error: listError,
+    navigate,
+    refresh,
+    createFolder,
+    removeEntry,
+    removeEntries,
+    renameEntry,
+    pasteClipboard,
+  } = useOSSFiles(client);
 
   /**
    * 上传任务:整批任务全部完成后才统一刷新文件列表并统一提示
@@ -88,6 +107,38 @@ const AppInner: React.FC = () => {
   const [renameDirProgress, setRenameDirProgress] = useState<RenameDirectoryProgress | null>(null);
   /** 对象 ACL 弹窗目标(仅文件) */
   const [objectAclEntry, setObjectAclEntry] = useState<FileEntry | null>(null);
+  /**
+   * 复制 / 剪切剪贴板（内存态，不落盘）。
+   * - `entries` 为列表快照；粘贴目标目录为当前 `prefix`（见 `handlePasteToCurrentDirectory`）。
+   * - 成功粘贴后清空；断开 OSS、选中回收站相关约束见各处的 `setClipboard(null)` / 禁用逻辑。
+   */
+  const [clipboard, setClipboard] = useState<FileClipboardState | null>(null);
+  /** 粘贴或剪切移动进行中时置 true，驱动 {@link PasteProgressModal} */
+  const [pasteModalOpen, setPasteModalOpen] = useState(false);
+  /** 弹窗内展示的聚合进度（当前条目 + 当前阶段 copy/delete 的子进度） */
+  const [pasteProgress, setPasteProgress] = useState<PasteProgress | null>(null);
+  /**
+   * OSS 粘贴过程中 `onPasteProgress` 回调频率极高（每个对象一次）。
+   * 用「始终写入 ref + 最多每 100ms flush 一次到 React state」节流，避免进度条与 Modal 闪烁。
+   */
+  const pasteProgressThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 节流窗口内最后一次进度，flush 时一次性写入 state，避免丢失尾部进度 */
+  const latestPasteProgressRef = useRef<PasteProgress | null>(null);
+
+  /**
+   * 粘贴进度节流回调：每次 OSS 上报先更新 `latestPasteProgressRef`，再在首个定时器触发时把最新值同步到 UI。
+   */
+  const onPasteProgressThrottled = useCallback((p: PasteProgress) => {
+    latestPasteProgressRef.current = p;
+    if (pasteProgressThrottleRef.current !== null) return;
+    pasteProgressThrottleRef.current = setTimeout(() => {
+      pasteProgressThrottleRef.current = null;
+      const v = latestPasteProgressRef.current;
+      if (v !== null) {
+        setPasteProgress(v);
+      }
+    }, 100);
+  }, []);
 
   /**
    * 当前目录的文件统计
@@ -124,6 +175,19 @@ const AppInner: React.FC = () => {
     [selectedCount, selectedEntries],
   );
 
+  /**
+   * 无选中项，或选中项中含桶根「回收站」系统目录时禁用批量复制与剪切
+   * （与 `bulkDeleteDisabled` 规则一致：避免误操作系统虚拟目录）
+   */
+  const bulkClipboardDisabled = useMemo(
+    () =>
+      selectedCount === 0 || selectedEntries.some((entry) => isRecycleBinDirectoryEntry(entry)),
+    [selectedCount, selectedEntries],
+  );
+
+  /** 已有剪贴板内容时工具栏展示「粘贴」，目标目录始终为当前浏览 `prefix` */
+  const clipboardReady = clipboard !== null && clipboard.entries.length > 0;
+
   // ====== 事件处理 ======
 
   /**
@@ -144,8 +208,81 @@ const AppInner: React.FC = () => {
     clearConfig();
     setSelectionMode(false);
     setSelectedRowKeys([]);
+    setClipboard(null);
     message.info('已断开 OSS 连接');
   }, [clearConfig, message]);
+
+  /**
+   * 将选中项写入剪贴板为「复制」：仅保存条目引用，真实 OSS copy 发生在粘贴阶段。
+   * 成功后退出多选模式，避免用户误以为仍需保持勾选。
+   */
+  const handleCopyToClipboard = useCallback(
+    (items: FileEntry[]) => {
+      if (items.length === 0) return;
+      setClipboard({ operation: 'copy', entries: [...items] });
+      message.success(items.length > 1 ? `已复制 ${items.length} 项` : '已复制');
+      setSelectedRowKeys([]);
+      setSelectionMode(false);
+    },
+    [message],
+  );
+
+  /**
+   * 将选中项写入剪贴板为「剪切」：粘贴时先复制到目标再删源（目录为整树复制后删源前缀）。
+   * 成功后同样退出多选模式。
+   */
+  const handleCutToClipboard = useCallback(
+    (items: FileEntry[]) => {
+      if (items.length === 0) return;
+      setClipboard({ operation: 'cut', entries: [...items] });
+      message.success(items.length > 1 ? `已剪切 ${items.length} 项` : '已剪切');
+      setSelectedRowKeys([]);
+      setSelectionMode(false);
+    },
+    [message],
+  );
+
+  /**
+   * 把剪贴板中的条目粘贴到**当前列表所在目录**（`prefix`）。
+   * 流程：重置节流定时器 → 展示占位进度 → 调用 `pasteClipboard` → 成功则清空剪贴板；
+   * `finally` 里刷新尾部进度、关弹窗并清空节流状态，避免关闭瞬间进度条回跳。
+   */
+  const handlePasteToCurrentDirectory = useCallback(async () => {
+    if (!clipboard || clipboard.entries.length === 0) return;
+    latestPasteProgressRef.current = null;
+    if (pasteProgressThrottleRef.current !== null) {
+      clearTimeout(pasteProgressThrottleRef.current);
+      pasteProgressThrottleRef.current = null;
+    }
+    setPasteProgress(buildInitialPasteProgress(clipboard));
+    setPasteModalOpen(true);
+    try {
+      await pasteClipboard(
+        clipboard.entries,
+        clipboard.operation,
+        prefix,
+        onPasteProgressThrottled,
+      );
+      message.success(clipboard.operation === 'cut' ? '已移动' : '已粘贴');
+      setClipboard(null);
+      setSelectedRowKeys([]);
+      setSelectionMode(false);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '粘贴失败');
+    } finally {
+      if (pasteProgressThrottleRef.current !== null) {
+        clearTimeout(pasteProgressThrottleRef.current);
+        pasteProgressThrottleRef.current = null;
+      }
+      const tail = latestPasteProgressRef.current;
+      if (tail !== null) {
+        setPasteProgress(tail);
+      }
+      setPasteModalOpen(false);
+      setPasteProgress(null);
+      latestPasteProgressRef.current = null;
+    }
+  }, [clipboard, onPasteProgressThrottled, pasteClipboard, message, prefix]);
 
   /**
    * 上传文件:添加到上传队列并打开上传面板
@@ -370,10 +507,12 @@ const AppInner: React.FC = () => {
     setSelectedRowKeys([]);
   }, [prefix]);
 
+  /** 失去 OSS 连接时清空剪贴板，避免断连后仍尝试粘贴导致误导性错误 */
   useEffect(() => {
     if (!connected) {
       setSelectionMode(false);
       setSelectedRowKeys([]);
+      setClipboard(null);
     }
   }, [connected]);
 
@@ -434,12 +573,19 @@ const AppInner: React.FC = () => {
           selectedCount={selectedCount}
           hasDirectorySelection={hasDirectorySelection}
           bulkDeleteDisabled={bulkDeleteDisabled}
+          bulkClipboardDisabled={bulkClipboardDisabled}
+          clipboardReady={clipboardReady}
+          pasteEntryCount={clipboard?.entries.length ?? 0}
+          pasteIsMove={clipboard?.operation === 'cut'}
           onUpload={handleUpload}
           onCreateFolder={() => setCreateFolderOpen(true)}
           onRefresh={() => void refresh()}
           onOpenConfig={() => setConfigOpen(true)}
           onToggleSelectionMode={handleToggleSelectionMode}
           onBulkDelete={handleBulkDelete}
+          onBulkCopy={() => handleCopyToClipboard(selectedEntries)}
+          onBulkCut={() => handleCutToClipboard(selectedEntries)}
+          onPaste={handlePasteToCurrentDirectory}
         />
 
         {connected && (
@@ -467,6 +613,8 @@ const AppInner: React.FC = () => {
             onRename={handleOpenRename}
             onGenerateUrl={handleGenerateUrl}
             onObjectAcl={handleOpenObjectAcl}
+            onCopyEntry={(entry) => handleCopyToClipboard([entry])}
+            onCutEntry={(entry) => handleCutToClipboard([entry])}
           />
         </div>
       </Content>
@@ -526,6 +674,9 @@ const AppInner: React.FC = () => {
         }}
         onConfirm={handleRenameConfirm}
       />
+
+      {/* 复制/剪切粘贴过程中的阻塞式进度（不可手动关闭，完成后由 handlePasteToCurrentDirectory 关闭） */}
+      <PasteProgressModal open={pasteModalOpen} progress={pasteProgress} />
     </Layout>
   );
 };

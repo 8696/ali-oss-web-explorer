@@ -19,12 +19,14 @@ import React, { useCallback, useState } from 'react';
 import { Table, Button, Popconfirm, Typography, Empty, Dropdown } from 'antd';
 import type { MenuProps } from 'antd';
 import {
+  CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
   FormOutlined,
   LinkOutlined,
   MoreOutlined,
   SafetyCertificateOutlined,
+  ScissorOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { TableRowSelection } from 'antd/es/table/interface';
@@ -64,6 +66,10 @@ export interface FileTableProps {
   onGenerateUrl: (entry: FileEntry) => void;
   /** 查看并修改对象 ACL(仅文件) */
   onObjectAcl: (entry: FileEntry) => void;
+  /** 将当前行加入剪贴板为复制 */
+  onCopyEntry: (entry: FileEntry) => void;
+  /** 将当前行加入剪贴板为剪切 */
+  onCutEntry: (entry: FileEntry) => void;
 }
 
 export const FileTable: React.FC<FileTableProps> = ({
@@ -80,6 +86,8 @@ export const FileTable: React.FC<FileTableProps> = ({
   onRename,
   onGenerateUrl,
   onObjectAcl,
+  onCopyEntry,
+  onCutEntry,
 }) => {
   /** 待确认删除的条目;非 null 时打开 {@link DeleteConfirmModal} */
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
@@ -144,7 +152,7 @@ export const FileTable: React.FC<FileTableProps> = ({
     {
       title: '操作',
       key: 'action',
-      width: 400,
+      width: 440,
       align: 'right',
       render: (_: unknown, record: FileEntry) => {
         /* 桶根「回收站」系统目录不展示任何操作按钮 */
@@ -224,6 +232,53 @@ export const FileTable: React.FC<FileTableProps> = ({
               重命名
             </Button>
           ),
+        );
+
+        /**
+         * 单行「剪切 / 复制」：与工具栏批量逻辑共用剪贴板。
+         * - 目录剪切需二次确认：底层为整树复制再删源，耗时长且失败时可能两侧残留对象。
+         * - `stopPropagation` 避免触发行点击导航；复制无需确认（与文件行为一致）。
+         */
+        actionNodes.push(
+          record.type === 'directory' ? (
+            <Popconfirm
+              key="cut"
+              title="确认剪切该文件夹?"
+              description="将通过复制后删除源路径完成移动；对象较多时耗时较长，中途失败可能在新旧路径下残留部分对象。"
+              okText="继续"
+              cancelText="取消"
+              onConfirm={() => onCutEntry(record)}
+            >
+              <Button type="text" size="small" icon={<ScissorOutlined />} onClick={(e) => e.stopPropagation()}>
+                剪切
+              </Button>
+            </Popconfirm>
+          ) : (
+            <Button
+              key="cut"
+              type="text"
+              size="small"
+              icon={<ScissorOutlined />}
+              onClick={(e) => {
+                e.stopPropagation();
+                onCutEntry(record);
+              }}
+            >
+              剪切
+            </Button>
+          ),
+          <Button
+            key="copy"
+            type="text"
+            size="small"
+            icon={<CopyOutlined />}
+            onClick={(e) => {
+              e.stopPropagation();
+              onCopyEntry(record);
+            }}
+          >
+            复制
+          </Button>,
         );
 
         actionNodes.push(

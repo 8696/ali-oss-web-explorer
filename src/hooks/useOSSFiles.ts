@@ -12,12 +12,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { message } from 'antd';
 import type OSS from 'ali-oss';
-import type { FileEntry, RenameDirectoryProgress } from '@/types/oss';
+import type {
+  FileClipboardOperation,
+  FileEntry,
+  PasteProgress,
+  RenameDirectoryProgress,
+} from '@/types/oss';
 import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
 import {
   createDirectory as svcCreateDirectory,
   deleteEntries as svcDeleteEntries,
   listAllFiles as svcListAllFiles,
+  pasteEntries as svcPasteEntries,
   renameEntry as svcRenameEntry,
 } from '@/services/oss';
 
@@ -67,6 +73,28 @@ function pushDirToUrl(dir: string) {
 }
 
 /**
+ * 剪切目录成功后，若当前浏览路径落在被移动的目录树下，同步改写 `prefix` 与地址栏 `?dir=`。
+ *
+ * 同一轮粘贴可能移动多个目录；若当前路径同时命中多条 `oldPrefix`，取**最长匹配**
+ * （最深嵌套的那条），避免错误地用外层目录映射替换内层路径。
+ */
+function remapBrowsingPrefixAfterCut(
+  currentPrefix: string,
+  moves: { oldPrefix: string; newPrefix: string }[],
+): string {
+  let best: { oldPrefix: string; newPrefix: string } | null = null;
+  for (const m of moves) {
+    if (currentPrefix.startsWith(m.oldPrefix)) {
+      if (!best || m.oldPrefix.length > best.oldPrefix.length) {
+        best = m;
+      }
+    }
+  }
+  if (!best) return currentPrefix;
+  return best.newPrefix + currentPrefix.slice(best.oldPrefix.length);
+}
+
+/**
  * Hook 输出
  */
 export interface UseOSSFilesResult {
@@ -101,6 +129,17 @@ export interface UseOSSFilesResult {
     newName: string,
     onDirectoryProgress?: (p: RenameDirectoryProgress) => void,
   ) => Promise<{ newPath: string }>;
+  /**
+   * 将剪贴板中的条目粘贴到目标父前缀下（复制或剪切）。
+   * - `destParentPrefix` 与列表 API 的 prefix 约定一致（根为 `''`，否则以 `/` 结尾）。
+   * - 剪切目录成功后若当前浏览路径落在该目录树下，会改写 `prefix` 并 `pushState` 更新 URL。
+   */
+  pasteClipboard: (
+    entries: FileEntry[],
+    operation: FileClipboardOperation,
+    destParentPrefix: string,
+    onPasteProgress?: (p: PasteProgress) => void,
+  ) => Promise<void>;
 }
 
 /**
@@ -314,6 +353,53 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
     [client, prefix, loadDirectory],
   );
 
+  const pasteClipboard = useCallback(
+    async (
+      entries: FileEntry[],
+      operation: FileClipboardOperation,
+      destParentPrefix: string,
+      onPasteProgress?: (p: PasteProgress) => void,
+    ) => {
+      if (!client) throw new Error('未连接 OSS');
+      requestTokenRef.current += 1;
+      const currentToken = requestTokenRef.current;
+      setLoading(true);
+      setError(null);
+      try {
+        const { directoryMoves } = await svcPasteEntries(
+          client,
+          entries,
+          operation,
+          destParentPrefix,
+          onPasteProgress,
+        );
+        let targetPrefix = prefix;
+        /* 仅剪切目录会返回映射；用户若正在子路径内浏览，需随目录一起「平移」当前 prefix */
+        if (operation === 'cut' && directoryMoves.length > 0) {
+          targetPrefix = remapBrowsingPrefixAfterCut(prefix, directoryMoves);
+        }
+        if (targetPrefix !== prefix) {
+          setPrefix(targetPrefix);
+          pushDirToUrl(targetPrefix);
+        }
+        /* 粘贴完成后始终刷新列表；若上面改过 prefix，则以新前缀列举 */
+        await loadDirectory(client, targetPrefix);
+      } catch (err) {
+        /*
+         * 粘贴/移动是非原子多步操作；即使最终失败，也可能已有部分对象写入或删除。
+         * 失败路径刷新当前列表，避免 UI 继续展示操作前的快照误导用户。
+         */
+        await loadDirectory(client, prefix);
+        throw err;
+      } finally {
+        if (currentToken === requestTokenRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [client, prefix, loadDirectory],
+  );
+
   return {
     prefix,
     entries,
@@ -325,5 +411,6 @@ export function useOSSFiles(client: OSS | null): UseOSSFilesResult {
     removeEntry,
     removeEntries,
     renameEntry,
+    pasteClipboard,
   };
 }

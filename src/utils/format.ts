@@ -45,6 +45,39 @@ export function extractName(objectKey: string): string {
 }
 
 /**
+ * 解析条目所在「父目录前缀」（用于由文件路径反推所在文件夹）。
+ *
+ * - `directory`：`path` 可为带尾 `/` 的目录前缀，先去掉末尾 `/` 再取倒数第二段之前的部分；
+ *   桶根下的一级目录父前缀为 `''`。
+ * - `file`：取最后一个 `/` 之前的内容（含末尾 `/`），根下文件父前缀为 `''`。
+ */
+export function parentPrefixFromEntryPath(path: string, type: 'file' | 'directory'): string {
+  if (type === 'directory') {
+    const trimmed = path.endsWith('/') ? path.slice(0, -1) : path;
+    const idx = trimmed.lastIndexOf('/');
+    return idx === -1 ? '' : trimmed.slice(0, idx + 1);
+  }
+  const idx = path.lastIndexOf('/');
+  return idx === -1 ? '' : path.slice(0, idx + 1);
+}
+
+/**
+ * 若将来支持「粘贴到选中条目」上下文：点到文件夹则目标父前缀为该文件夹自身（规范化为尾 `/`）；
+ * 点到文件则粘贴到该文件所在目录（即文件的父前缀）。
+ *
+ * 当前主流程粘贴到当前列表目录时亦可复用该几何语义。
+ */
+export function getPasteDestinationParent(entry: {
+  type: 'file' | 'directory';
+  path: string;
+}): string {
+  if (entry.type === 'directory') {
+    return entry.path.endsWith('/') ? entry.path : `${entry.path}/`;
+  }
+  return parentPrefixFromEntryPath(entry.path, 'file');
+}
+
+/**
  * 将当前前缀拆分成面包屑可消费的片段
  * @param prefix 当前目录前缀,例如 "a/b/c/"
  * @returns [{label:'根目录',prefix:''},{label:'a',prefix:'a/'},...]
