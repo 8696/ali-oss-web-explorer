@@ -121,3 +121,41 @@ export interface RenameDirectoryProgress {
   done: number;
   total: number;
 }
+
+/** 剪贴板操作类型；执行粘贴并成功后由 UI 清空内存剪贴板（复制与剪切均如此） */
+export type FileClipboardOperation = 'copy' | 'cut';
+
+/**
+ * 文件列表复制/剪切剪贴板状态（仅存于前端内存）。
+ * `entries` 为发起复制/剪切时的条目快照；目标路径在粘贴时按当前浏览目录计算。
+ */
+export interface FileClipboardState {
+  operation: FileClipboardOperation;
+  entries: FileEntry[];
+}
+
+/**
+ * 粘贴到 OSS 时的聚合进度，供粘贴进度弹窗展示。
+ *
+ * - `entryIndex` / `entryTotal`：剪贴板内多项时批量顺序处理时的外层进度。
+ * - `phase` + `done` / `total`：当前这一条目内部的子阶段（文件常为 1 步；目录为「整树复制」与可选的「删源」多块进度）。
+ */
+export interface PasteProgress {
+  operation: FileClipboardOperation;
+  /** 当前处理剪贴板中第几项，从 1 开始 */
+  entryIndex: number;
+  /** 剪贴板内去重后的条目总数 */
+  entryTotal: number;
+  /** 当前条目的显示名（目录或文件的「最后一段」） */
+  entryName: string;
+  entryType: 'file' | 'directory';
+  /**
+   * `copy`：正在向目标路径写入（OSS copy 或整树复制）；
+   * `delete`：剪切模式下复制完成后，正在删除源路径下的对象。
+   */
+  phase: 'copy' | 'delete';
+  /** 当前子阶段已完成的对象数 */
+  done: number;
+  /** 当前子阶段总对象数（目录复制/删除时可能很大） */
+  total: number;
+}

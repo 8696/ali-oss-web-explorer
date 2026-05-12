@@ -16,7 +16,15 @@ import {
   isObjectKeyUnderRecycleBin,
   isRecycleBinDirectoryEntry,
 } from '@/constants/recycleBin';
-import type { OSSConfig, FileEntry, ListFilesResult, ObjectAcl, RenameDirectoryProgress } from '@/types/oss';
+import type {
+  OSSConfig,
+  FileEntry,
+  FileClipboardOperation,
+  ListFilesResult,
+  ObjectAcl,
+  PasteProgress,
+  RenameDirectoryProgress,
+} from '@/types/oss';
 import { extractName } from '@/utils/format';
 
 /** 自 `constants/recycleBin` 再导出,便于外部仅从 `services/oss` 引用 OSS 与回收站约定 */
@@ -717,6 +725,209 @@ export async function renameEntry(
 }
 
 /**
+ * 将「列表所在目录」前缀规范为粘贴目标父前缀：根目录 `''`，非根一律以 `/` 结尾，
+ * 以便与 `parent + entry.name` 拼接成合法 OSS Key。
+ */
+function normalizeDestParentPrefix(prefix: string): string {
+  if (!prefix) return '';
+  return prefix.endsWith('/') ? prefix : `${prefix}/`;
+}
+
+/**
+ * 将整棵目录对象树复制到另一前缀下（不删除源），用于复制/粘贴与剪切的首阶段。
+ *
+ * 空目录边界：`listAllObjectKeysWithPrefix` 可能返回空列表，此时尝试 head/copy 目录占位对象，
+ * 若源仅为PutObject创建的「零字节目录」占位且无子对象，则退化为创建目标占位。
+ */
+async function duplicateDirectoryTree(
+  client: OSS,
+  oldPrefixInput: string,
+  destPrefixInput: string,
+  onDirectoryProgress?: (p: RenameDirectoryProgress) => void,
+): Promise<void> {
+  const oldPrefix = oldPrefixInput.endsWith('/') ? oldPrefixInput : `${oldPrefixInput}/`;
+  const destPrefix = destPrefixInput.endsWith('/') ? destPrefixInput : `${destPrefixInput}/`;
+
+  await assertDirectoryDestinationFree(client, destPrefix);
+
+  const keys = await listAllObjectKeysWithPrefix(client, oldPrefix);
+
+  if (keys.length === 0) {
+    onDirectoryProgress?.({ phase: 'copy', done: 0, total: 1 });
+    try {
+      await client.head(oldPrefix);
+      await client.copy(destPrefix, oldPrefix);
+    } catch (err: unknown) {
+      const e = err as { status?: number; code?: string };
+      if (e?.status === 404 || e?.code === 'NoSuchKey') {
+        await client.put(destPrefix, new Blob([], { type: 'application/x-directory' }));
+      } else {
+        throw err instanceof Error ? err : new Error('OSS 操作失败');
+      }
+    }
+    onDirectoryProgress?.({ phase: 'copy', done: 1, total: 1 });
+    return;
+  }
+
+  const pairs = keys.map((key) => {
+    const suffix = key.startsWith(oldPrefix) ? key.slice(oldPrefix.length) : key;
+    return { src: key, dest: `${destPrefix}${suffix}` };
+  });
+  const total = pairs.length;
+  onDirectoryProgress?.({ phase: 'copy', done: 0, total });
+  await copyObjectPairsConcurrent(client, pairs, (done, tot) => {
+    onDirectoryProgress?.({ phase: 'copy', done, total: tot });
+  });
+}
+
+/**
+ * 将列表中的文件/目录粘贴到目标父前缀下(复制或剪切)。
+ *
+ * - 目标父前缀与列表列举前缀一致:根目录为 `''`,否则以 `/` 结尾。
+ * - 剪切目录后若当前浏览路径落在该目录树下,调用方需根据返回的 `directoryMoves` 改写 prefix。
+ *
+ * @returns `directoryMoves` 仅含本次剪切成功的目录 (旧前缀 → 新前缀),供导航同步。
+ */
+export async function pasteEntries(
+  client: OSS,
+  sources: FileEntry[],
+  operation: FileClipboardOperation,
+  destParentPrefix: string,
+  onPasteProgress?: (p: PasteProgress) => void,
+): Promise<{ directoryMoves: { oldPrefix: string; newPrefix: string }[] }> {
+  /* 同一 path 只处理一次，避免 UI 多选重复行导致重复复制 */
+  const deduped = Array.from(new Map(sources.map((e) => [e.path, e])).values());
+  const entryTotal = deduped.length;
+
+  const emit = (partial: Omit<PasteProgress, 'operation'>) => {
+    onPasteProgress?.({ operation, ...partial });
+  };
+
+  for (const entry of deduped) {
+    if (isRecycleBinDirectoryEntry(entry)) {
+      throw new Error(`无法复制或移动桶根系统目录「${RECYCLE_BIN_FOLDER}」`);
+    }
+  }
+
+  const parent = normalizeDestParentPrefix(destParentPrefix);
+  const directoryMoves: { oldPrefix: string; newPrefix: string }[] = [];
+
+  /* 剪切目录时禁止迁入自身子路径（OSS 前缀包含关系），否则复制阶段会产生不一致树 */
+  if (operation === 'cut') {
+    for (const entry of deduped) {
+      if (entry.type === 'directory') {
+        const oldPrefix = entry.path.endsWith('/') ? entry.path : `${entry.path}/`;
+        const destDirPrefix = `${parent}${entry.name}/`;
+        if (destDirPrefix.startsWith(oldPrefix)) {
+          throw new Error('不能将文件夹移动到自身路径下');
+        }
+      }
+    }
+  }
+
+  try {
+    for (let idx = 0; idx < deduped.length; idx++) {
+      const entry = deduped[idx];
+      const entryIndex = idx + 1;
+
+      /* ----- 文件：单对象 copy，剪切时再 delete 源 ----- */
+      if (entry.type === 'file') {
+        const destKey = `${parent}${entry.name}`;
+        if (operation === 'cut' && destKey === entry.path) {
+          throw new Error('目标与源相同');
+        }
+        emit({
+          entryIndex,
+          entryTotal,
+          entryName: entry.name,
+          entryType: 'file',
+          phase: 'copy',
+          done: 0,
+          total: 1,
+        });
+        await assertFileDestinationFree(client, destKey);
+        await client.copy(destKey, entry.path);
+        emit({
+          entryIndex,
+          entryTotal,
+          entryName: entry.name,
+          entryType: 'file',
+          phase: 'copy',
+          done: 1,
+          total: 1,
+        });
+        if (operation === 'cut') {
+          emit({
+            entryIndex,
+            entryTotal,
+            entryName: entry.name,
+            entryType: 'file',
+            phase: 'delete',
+            done: 0,
+            total: 1,
+          });
+          await deleteObjectIgnoreNotFound(client, entry.path);
+          emit({
+            entryIndex,
+            entryTotal,
+            entryName: entry.name,
+            entryType: 'file',
+            phase: 'delete',
+            done: 1,
+            total: 1,
+          });
+        }
+      } else {
+        /* ----- 目录：duplicateDirectoryTree 整树复制；剪切时再 deleteDirectory 删源并记录映射 ----- */
+        const oldPrefix = entry.path.endsWith('/') ? entry.path : `${entry.path}/`;
+        const destDirPrefix = `${parent}${entry.name}/`;
+        if (operation === 'cut' && destDirPrefix === oldPrefix) {
+          throw new Error('目标与源相同');
+        }
+        const wrapDir = (p: RenameDirectoryProgress) => {
+          emit({
+            entryIndex,
+            entryTotal,
+            entryName: entry.name,
+            entryType: 'directory',
+            phase: p.phase,
+            done: p.done,
+            total: p.total,
+          });
+        };
+        await duplicateDirectoryTree(client, oldPrefix, destDirPrefix, wrapDir);
+        if (operation === 'cut') {
+          await deleteDirectory(client, oldPrefix, (p) => {
+            emit({
+              entryIndex,
+              entryTotal,
+              entryName: entry.name,
+              entryType: 'directory',
+              phase: 'delete',
+              done: p.done,
+              total: p.total,
+            });
+          });
+          directoryMoves.push({ oldPrefix, newPrefix: destDirPrefix });
+        }
+      }
+    }
+    return { directoryMoves };
+  } catch (err) {
+    const e = normalizeOSSBrowserError(err);
+    const m = e.message;
+    const hint = '复制或移动为多步操作，失败时可能已部分完成，请刷新列表并核对源路径与目标路径。';
+    if (
+      /已部分完成|请刷新列表|核对源路径与目标路径/.test(m) ||
+      /CORS|Expose-Headers|跨域设置/.test(m)
+    ) {
+      throw e;
+    }
+    throw new Error(`${m}（${hint}）`);
+  }
+}
+
+/**
  * 删除单个文件
  * @param client OSS 客户端
  * @param objectKey 目标文件 Key
@@ -836,38 +1047,35 @@ export async function deleteEntries(
 /**
  * 递归删除目录下的所有对象
  *
- * 由于 OSS 无目录概念,需要:
- *   1. 用 prefix 列举该目录下所有对象(不使用 delimiter,递归列举)
- *   2. 调用 deleteMulti 批量删除(每次最多 1000 个)
- *   3. 循环直到没有更多对象
+ * 由于 OSS 无目录概念，需要：
+ *   1. 用 prefix 列举该目录下所有对象（不使用 delimiter，含「目录」占位与子对象）
+ *   2. 先合并完整 Key 列表，再按每批最多 1000 个调用 deleteMulti（便于上报删除进度）
  *
  * @param client OSS 客户端
- * @param prefix 目录前缀,必须以 `/` 结尾
+ * @param prefix 目录前缀，必须以 `/` 结尾
+ * @param onProgress 可选；删除大量对象时上报 `done/total`，供剪切目录等 UI 使用
  */
-export async function deleteDirectory(client: OSS, prefix: string): Promise<void> {
+export async function deleteDirectory(
+  client: OSS,
+  prefix: string,
+  onProgress?: (p: RenameDirectoryProgress) => void,
+): Promise<void> {
   if (!prefix.endsWith('/')) {
     throw new Error('目录前缀必须以 "/" 结尾');
   }
   if (prefix === ROOT_RECYCLE_BIN_PREFIX) {
     throw new Error(`禁止递归删除桶根系统目录「${RECYCLE_BIN_FOLDER}」。`);
   }
-  let nextMarker: string | undefined = undefined;
-  // 持续翻页直到列举完所有对象
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const res = await client.list(
-      {
-        prefix,
-        'max-keys': 1000,
-        marker: nextMarker,
-      },
-      {},
-    );
-    const keys = (res.objects ?? []).map((o) => o.name);
-    if (keys.length > 0) {
-      await client.deleteMulti(keys, { quiet: true });
-    }
-    if (!res.isTruncated) break;
-    nextMarker = res.nextMarker;
+
+  const keys = await listAllObjectKeysWithPrefix(client, prefix);
+  if (keys.length === 0) {
+    return;
+  }
+  const total = keys.length;
+  onProgress?.({ phase: 'delete', done: 0, total });
+  for (let i = 0; i < keys.length; i += 1000) {
+    const chunk = keys.slice(i, i + 1000);
+    await client.deleteMulti(chunk, { quiet: true });
+    onProgress?.({ phase: 'delete', done: Math.min(i + chunk.length, total), total });
   }
 }

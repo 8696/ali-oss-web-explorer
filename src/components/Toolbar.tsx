@@ -2,20 +2,23 @@
  * Toolbar
  *
  * 文件浏览器顶部的操作工具栏。
- * 集成:上传、新建文件夹、多选模式、批量删除(经 {@link DeleteConfirmModal} 二次确认)、刷新、OSS 配置入口。
+ * 集成:上传、新建文件夹、多选模式、批量剪切/复制与粘贴到当前目录(粘贴前 Popconfirm)、批量删除(经 {@link DeleteConfirmModal} 二次确认)、刷新、OSS 配置入口。
  * 批量删除失败时不关闭确认弹窗,由父组件 `onBulkDelete` 抛错;成功时本组件在 `onConfirm` 内关闭弹窗。
  * 使用 Ant Design 的 Space 与 Button 实现,间距由 Tailwind 控制。
  */
 
 import React, { useRef, useState } from 'react';
-import { Button, Space, Tooltip } from 'antd';
+import { Button, Popconfirm, Space, Tooltip } from 'antd';
 import {
   CheckSquareOutlined,
   CloudUploadOutlined,
+  CopyOutlined,
   DeleteOutlined,
   FolderAddOutlined,
   ReloadOutlined,
+  ScissorOutlined,
   SettingOutlined,
+  SnippetsOutlined,
 } from '@ant-design/icons';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 
@@ -42,6 +45,20 @@ export interface ToolbarProps {
   onToggleSelectionMode: () => void;
   /** 批量删除已选项 */
   onBulkDelete: () => void | Promise<void>;
+  /** 批量复制到剪贴板是否不可用(无选中或含桶根「回收站」目录) */
+  bulkClipboardDisabled: boolean;
+  /** 批量复制当前选中项 */
+  onBulkCopy: () => void;
+  /** 批量剪切当前选中项 */
+  onBulkCut: () => void;
+  /** 是否已有复制或剪切内容，用于显示「粘贴」 */
+  clipboardReady: boolean;
+  /** 剪贴板内条目数，用于粘贴确认文案 */
+  pasteEntryCount: number;
+  /** 是否为剪切（移动），否则为复制粘贴 */
+  pasteIsMove: boolean;
+  /** 粘贴到当前目录 */
+  onPaste: () => void | Promise<void>;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -56,6 +73,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onOpenConfig,
   onToggleSelectionMode,
   onBulkDelete,
+  bulkClipboardDisabled,
+  onBulkCopy,
+  onBulkCut,
+  clipboardReady,
+  pasteEntryCount,
+  pasteIsMove,
+  onPaste,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** 批量删除确认弹窗开关;打开时由 {@link DeleteConfirmModal} 要求用户输入「确定删除」 */
@@ -79,6 +103,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     ? selectedCount === 0
       ? '请先选择要删除的项'
       : '选中了「回收站」系统文件夹，无法批量删除'
+    : undefined;
+
+  /** 与 `bulkDeleteTooltip` 同理：无选中或选中桶根「回收站」时禁用并提示原因 */
+  const bulkClipboardTooltip = bulkClipboardDisabled
+    ? selectedCount === 0
+      ? '请先选择要复制或剪切的项'
+      : '选中了「回收站」系统文件夹，无法复制或剪切'
     : undefined;
 
   return (
@@ -120,6 +151,29 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         >
           {selectionMode ? '取消选择' : '选择文件'}
         </Button>
+        {/* 多选模式下批量写入剪贴板；禁用态需包一层 span，Tooltip 才能绑定到禁用按钮上 */}
+        {selectionMode &&
+          (bulkClipboardDisabled ? (
+            <Tooltip title={bulkClipboardTooltip}>
+              <span className="inline-flex gap-1">
+                <Button icon={<ScissorOutlined />} disabled>
+                  {`剪切已选（${selectedCount}）`}
+                </Button>
+                <Button icon={<CopyOutlined />} disabled>
+                  {`复制已选（${selectedCount}）`}
+                </Button>
+              </span>
+            </Tooltip>
+          ) : (
+            <>
+              <Button icon={<ScissorOutlined />} onClick={onBulkCut}>
+                {`剪切已选（${selectedCount}）`}
+              </Button>
+              <Button icon={<CopyOutlined />} onClick={onBulkCopy}>
+                {`复制已选（${selectedCount}）`}
+              </Button>
+            </>
+          ))}
         {selectionMode &&
           (bulkDeleteDisabled ? (
             <Tooltip title={bulkDeleteTooltip}>
@@ -138,6 +192,27 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               {`删除已选（${selectedCount}）`}
             </Button>
           ))}
+        {/* 有剪贴板内容即显示；粘贴目标固定为当前列表目录（由 App 传入的 prefix），未连接时禁用 */}
+        {clipboardReady && (
+          <Tooltip title="粘贴到当前目录">
+            <Popconfirm
+              title="确认粘贴？"
+              description={
+                pasteIsMove
+                  ? `将把剪切的 ${pasteEntryCount} 项移动到当前目录；含文件夹时耗时可能较久，是否继续？`
+                  : `将把复制的 ${pasteEntryCount} 项粘贴到当前目录；含文件夹时耗时可能较久，是否继续？`
+              }
+              okText="粘贴"
+              cancelText="取消"
+              disabled={!connected}
+              onConfirm={() => void onPaste()}
+            >
+              <Button icon={<SnippetsOutlined />} disabled={!connected}>
+                粘贴
+              </Button>
+            </Popconfirm>
+          </Tooltip>
+        )}
         <Tooltip title="刷新当前目录">
           <Button
             icon={<ReloadOutlined />}

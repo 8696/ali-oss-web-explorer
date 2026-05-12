@@ -6,7 +6,7 @@
  * 支持单击目录进入下级、单击文件名预览、操作列下载、链接、ACL、删除与重命名。
  *
  * 回收站相关:
- *   - 桶根系统目录「回收站」不可重命名、不可删除、多选时不可勾选;
+ *   - 桶根系统目录「回收站」操作列为空(无按钮);多选时不可勾选;
  *   - 单行删除同样经 {@link DeleteConfirmModal} 确认,与工具栏批量删除交互一致。
  *
  * 设计思路:
@@ -15,14 +15,18 @@
  *   - 行为(导航、下载、删除、重命名)通过 props 的回调上报给父组件。
  */
 
-import React, { useCallback, useState } from 'react';
-import { Table, Button, Popconfirm, Typography, Empty, Tooltip } from 'antd';
+import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { Table, Button, Typography, Empty, Dropdown, App as AntdApp } from 'antd';
+import type { MenuProps } from 'antd';
 import {
+  CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
   FormOutlined,
   LinkOutlined,
+  MoreOutlined,
   SafetyCertificateOutlined,
+  ScissorOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { TableRowSelection } from 'antd/es/table/interface';
@@ -31,6 +35,9 @@ import { formatDateTime, formatFileSize } from '@/utils/format';
 import { resolveFileIcon } from '@/components/fileIcon';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
+
+/** 虚拟列表 tbody 最小滚动高度(px)，低于此值体验较差 */
+const VIRTUAL_BODY_MIN = 160;
 
 export interface FileTableProps {
   /** 文件与目录列表 */
@@ -59,6 +66,10 @@ export interface FileTableProps {
   onGenerateUrl: (entry: FileEntry) => void;
   /** 查看并修改对象 ACL(仅文件) */
   onObjectAcl: (entry: FileEntry) => void;
+  /** 将当前行加入剪贴板为复制 */
+  onCopyEntry: (entry: FileEntry) => void;
+  /** 将当前行加入剪贴板为剪切 */
+  onCutEntry: (entry: FileEntry) => void;
 }
 
 export const FileTable: React.FC<FileTableProps> = ({
@@ -75,9 +86,17 @@ export const FileTable: React.FC<FileTableProps> = ({
   onRename,
   onGenerateUrl,
   onObjectAcl,
+  onCopyEntry,
+  onCutEntry,
 }) => {
+  const tableWrapRef = useRef<HTMLDivElement>(null);
+  /** 传给 Table scroll.y，决定虚拟列表可视区域高度 */
+  const [bodyScrollY, setBodyScrollY] = useState(VIRTUAL_BODY_MIN);
+
   /** 待确认删除的条目;非 null 时打开 {@link DeleteConfirmModal} */
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+  /** 全局 Modal API,用于目录重命名/剪切的二次确认 */
+  const { modal } = AntdApp.useApp();
 
   const handleRowClick = useCallback(
     (record: FileEntry) => {
@@ -139,16 +158,119 @@ export const FileTable: React.FC<FileTableProps> = ({
     {
       title: '操作',
       key: 'action',
-      width: 188,
+      width: 260,
       align: 'right',
       render: (_: unknown, record: FileEntry) => {
-        // 仅桶根「回收站」目录加锁;深层同名普通文件夹不受影响
-        const recycleBinLocked = isRecycleBinDirectoryEntry(record);
+        /* 桶根「回收站」系统目录不展示任何操作按钮 */
+        if (isRecycleBinDirectoryEntry(record)) {
+          return <span className="text-sm text-muted">-</span>;
+        }
+
+        const isDirectory = record.type === 'directory';
+
+        /**
+         * 目录重命名底层为「批量 copy + deleteMulti」,非原子操作,需弹框二次确认。
+         */
+        const triggerDirectoryRename = () => {
+          modal.confirm({
+            title: '确认重命名该文件夹?',
+            content:
+              '通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。',
+            okText: '继续',
+            cancelText: '取消',
+            onOk: () => onRename(record),
+          });
+        };
+
+        /**
+         * 构建「更多」下拉菜单项。
+         * - 文件: 读写权限 / 重命名 / 剪切 / 复制 / 删除
+         * - 目录: 剪切 / 复制 / 删除(重命名已固定到外层按钮)
+         * 菜单项自身的 onClick 直接触发动作,无需在 label 内再嵌套按钮。
+         */
+        const overflowItems: MenuProps['items'] = [];
+
+        if (!isDirectory) {
+          overflowItems.push({
+            key: 'acl',
+            icon: <SafetyCertificateOutlined />,
+            label: '读写权限',
+            onClick: ({ domEvent }) => {
+              domEvent.stopPropagation();
+              onObjectAcl(record);
+            },
+          });
+          overflowItems.push({
+            key: 'rename',
+            icon: <FormOutlined />,
+            label: '重命名',
+            onClick: ({ domEvent }) => {
+              domEvent.stopPropagation();
+              onRename(record);
+            },
+          });
+        }
+
+        overflowItems.push({
+          key: 'cut',
+          icon: <ScissorOutlined />,
+          label: '剪切',
+          onClick: ({ domEvent }) => {
+            domEvent.stopPropagation();
+            if (isDirectory) {
+              modal.confirm({
+                title: '确认剪切该文件夹?',
+                content:
+                  '将通过复制后删除源路径完成移动；对象较多时耗时较长，中途失败可能在新旧路径下残留部分对象。',
+                okText: '继续',
+                cancelText: '取消',
+                onOk: () => onCutEntry(record),
+              });
+            } else {
+              onCutEntry(record);
+            }
+          },
+        });
+
+        overflowItems.push({
+          key: 'copy',
+          icon: <CopyOutlined />,
+          label: '复制',
+          onClick: ({ domEvent }) => {
+            domEvent.stopPropagation();
+            onCopyEntry(record);
+          },
+        });
+
+        overflowItems.push({ type: 'divider', key: 'divider-before-delete' });
+
+        overflowItems.push({
+          key: 'delete',
+          icon: <DeleteOutlined />,
+          label: '删除',
+          danger: true,
+          onClick: ({ domEvent }) => {
+            domEvent.stopPropagation();
+            setDeleteTarget(record);
+          },
+        });
+
         return (
-        <div className="file-actions">
-          {record.type === 'file' && (
-            <>
-              <Tooltip title="下载">
+          <div className="file-actions">
+            {isDirectory ? (
+              <Button
+                type="text"
+                size="small"
+                icon={<FormOutlined />}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  triggerDirectoryRename();
+                }}
+              >
+                重命名
+              </Button>
+            ) : (
+              <>
                 <Button
                   type="text"
                   size="small"
@@ -157,9 +279,9 @@ export const FileTable: React.FC<FileTableProps> = ({
                     e.stopPropagation();
                     onDownloadFile(record);
                   }}
-                />
-              </Tooltip>
-              <Tooltip title="生成链接">
+                >
+                  下载
+                </Button>
                 <Button
                   type="text"
                   size="small"
@@ -168,81 +290,22 @@ export const FileTable: React.FC<FileTableProps> = ({
                     e.stopPropagation();
                     onGenerateUrl(record);
                   }}
-                />
-              </Tooltip>
-              <Tooltip title="读写权限">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<SafetyCertificateOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onObjectAcl(record);
-                  }}
-                />
-              </Tooltip>
-            </>
-          )}
-          {/* 文件与目录均支持重命名;目录在 OSS 侧为批量 copy + deleteMulti,故目录需二次确认 */}
-          {record.type === 'directory' ? (
-            recycleBinLocked ? (
-              <Tooltip title="「回收站」为系统目录，不可重命名">
-                <span className="inline-block" onClick={(e) => e.stopPropagation()}>
-                  <Button type="text" size="small" icon={<FormOutlined />} disabled />
-                </span>
-              </Tooltip>
-            ) : (
-              <Popconfirm
-                title="确认重命名该文件夹?"
-                description="通过多次复制与删除完成,非原子操作;中途失败可能在新旧路径下残留部分对象。重要数据请先备份。"
-                okText="继续"
-                cancelText="取消"
-                onConfirm={() => onRename(record)}
+                >
+                  生成链接
+                </Button>
+              </>
+            )}
+            <Dropdown menu={{ items: overflowItems }} trigger={['hover']} placement="bottomRight">
+              <Button
+                type="text"
+                size="small"
+                icon={<MoreOutlined />}
+                onClick={(e) => e.stopPropagation()}
               >
-                <Tooltip title="重命名">
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<FormOutlined />}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                </Tooltip>
-              </Popconfirm>
-            )
-          ) : (
-            <Tooltip title="重命名">
-              <Button
-                type="text"
-                size="small"
-                icon={<FormOutlined />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRename(record);
-                }}
-              />
-            </Tooltip>
-          )}
-          {recycleBinLocked ? (
-            <Tooltip title="「回收站」为系统目录，不可删除">
-              <span className="inline-block" onClick={(e) => e.stopPropagation()}>
-                <Button type="text" size="small" danger icon={<DeleteOutlined />} disabled />
-              </span>
-            </Tooltip>
-          ) : (
-            <Tooltip title="删除">
-              <Button
-                type="text"
-                size="small"
-                danger
-                icon={<DeleteOutlined />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDeleteTarget(record);
-                }}
-              />
-            </Tooltip>
-          )}
-        </div>
+                更多
+              </Button>
+            </Dropdown>
+          </div>
         );
       },
     },
@@ -251,6 +314,8 @@ export const FileTable: React.FC<FileTableProps> = ({
   /** 多选模式下为表格启用行选择;系统「回收站」行禁止勾选,与批量删除禁用规则一致 */
   const rowSelection: TableRowSelection<FileEntry> | undefined = selectionMode
     ? {
+      columnWidth: 48,
+      align: 'center',
       selectedRowKeys,
       onChange: (nextSelectedRowKeys) => onSelectedRowKeysChange(nextSelectedRowKeys),
       getCheckboxProps: (record) =>
@@ -259,6 +324,32 @@ export const FileTable: React.FC<FileTableProps> = ({
           : {},
     }
     : undefined;
+
+  const measureBodyScrollY = useCallback(() => {
+    const wrap = tableWrapRef.current;
+    if (!wrap) return;
+    const thead = wrap.querySelector('.ant-table-thead');
+    const theadH = thead?.getBoundingClientRect().height ?? 0;
+    const headH = theadH > 0 ? theadH : 48;
+    const next = Math.floor(wrap.clientHeight - headH);
+    const clamped = Math.max(VIRTUAL_BODY_MIN, next);
+    setBodyScrollY((prev) => (prev === clamped ? prev : clamped));
+  }, []);
+
+  useLayoutEffect(() => {
+    const wrap = tableWrapRef.current;
+    if (!wrap) return;
+    measureBodyScrollY();
+    const ro = new ResizeObserver(() => {
+      requestAnimationFrame(measureBodyScrollY);
+    });
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [measureBodyScrollY]);
+
+  useLayoutEffect(() => {
+    requestAnimationFrame(measureBodyScrollY);
+  }, [entries.length, loading, selectionMode, connected, measureBodyScrollY]);
 
   return (
     <>
@@ -283,31 +374,38 @@ export const FileTable: React.FC<FileTableProps> = ({
           }
         }}
       />
-    <Table<FileEntry>
-      dataSource={entries}
-      columns={columns}
-      rowKey="key"
-      rowSelection={rowSelection}
-      loading={loading}
-      size="middle"
-      pagination={false}
-      className="modern-file-table flex-1"
-      locale={{
-        emptyText: connected ? (
-          <Empty description="当前目录为空" />
-        ) : (
-          <Empty
-            description={
-              <Typography.Text type="secondary">
-                请先点击右上角
-                <SettingOutlined className="mx-1" />
-                配置 OSS 连接
-              </Typography.Text>
-            }
-          />
-        ),
-      }}
-    />
+    <div
+      ref={tableWrapRef}
+      className="modern-file-table file-table-virtual flex min-h-0 flex-1 flex-col"
+    >
+      <Table<FileEntry>
+        dataSource={entries}
+        columns={columns}
+        rowKey="key"
+        rowSelection={rowSelection}
+        loading={loading}
+        size="middle"
+        pagination={false}
+        virtual
+        scroll={{ y: bodyScrollY }}
+        className="min-h-0 flex-1"
+        locale={{
+          emptyText: connected ? (
+            <Empty description="当前目录为空" />
+          ) : (
+            <Empty
+              description={
+                <Typography.Text type="secondary">
+                  请先点击右上角
+                  <SettingOutlined className="mx-1" />
+                  配置 OSS 连接
+                </Typography.Text>
+              }
+            />
+          ),
+        }}
+      />
+    </div>
     </>
   );
 };
