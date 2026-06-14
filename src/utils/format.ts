@@ -98,6 +98,51 @@ export function splitPrefixToCrumbs(prefix: string): { label: string; prefix: st
  * 根据文件名识别简化的文件类型(用于挑选图标)
  * @param name 文件名
  */
+/** 允许在线编辑的文本类扩展名 */
+const EDITABLE_TEXT_EXTENSIONS = new Set([
+  // 纯文本 / 文档
+  'txt', 'md', 'mdx', 'markdown', 'log', 'text', 'rst', 'adoc',
+  // 配置 / 数据
+  'json', 'json5', 'jsonc', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
+  'env', 'properties', 'xml', 'csv', 'tsv', 'plist',
+  // Web 前端
+  'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'html', 'htm', 'xhtml',
+  'css', 'scss', 'sass', 'less', 'styl',
+  'vue', 'svelte', 'astro',
+  // 模板
+  'ejs', 'hbs', 'handlebars', 'mustache', 'pug', 'jade', 'njk', 'jinja', 'jinja2',
+  // 后端 / 脚本
+  'py', 'pyw', 'rb', 'rake', 'php', 'java', 'kt', 'kts', 'groovy',
+  'go', 'rs', 'swift', 'cs', 'fs', 'fsx', 'vb',
+  'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'hxx',
+  'sh', 'bash', 'zsh', 'fish', 'ps1', 'psm1', 'bat', 'cmd',
+  'lua', 'pl', 'pm', 'r', 'scala', 'clj', 'cljs', 'erl', 'ex', 'exs',
+  'dart', 'nim', 'zig', 'v',
+  // 数据库 / 查询
+  'sql', 'graphql', 'gql',
+  // DevOps / 基础设施
+  'dockerfile', 'containerfile', 'makefile', 'mk',
+  'tf', 'tfvars', 'hcl', 'bicep', 'nomad',
+  'proto', 'thrift', 'avsc',
+  // 标记 / 排版
+  'tex', 'latex', 'bib', 'cls', 'sty',
+  // 其他
+  'diff', 'patch', 'gitignore', 'gitattributes', 'editorconfig',
+  'lock', 'sum', 'mod',
+]);
+
+/** 文本编辑允许的最大文件大小(字节)，10 MB */
+export const MAX_EDITABLE_TEXT_SIZE = 10 * 1024 * 1024;
+
+/**
+ * 判断文件扩展名是否属于可在浏览器内编辑的文本类型
+ * @param name 文件名
+ */
+export function isEditableTextFile(name: string): boolean {
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  return EDITABLE_TEXT_EXTENSIONS.has(ext);
+}
+
 export function guessFileCategory(name: string): string {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico'].includes(ext)) return 'image';

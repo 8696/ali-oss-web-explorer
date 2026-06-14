@@ -27,9 +27,10 @@ import { CreateFolderModal } from '@/components/CreateFolderModal';
 import { GenerateUrlModal } from '@/components/GenerateUrlModal';
 import { ObjectAclModal } from '@/components/ObjectAclModal';
 import { PasteProgressModal, buildInitialPasteProgress } from '@/components/PasteProgressModal';
+import { TextEditorModal } from '@/components/TextEditorModal';
 import { RenameModal } from '@/components/RenameModal';
 import { RECYCLE_BIN_FOLDER, isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
-import { getObjectAcl, getSignedAccessUrl, getSignedUrl, putObjectAcl } from '@/services/oss';
+import { getObjectAcl, getObjectContent, getSignedAccessUrl, getSignedUrl, putObjectAcl, putObjectContent } from '@/services/oss';
 import type {
   FileClipboardState,
   FileEntry,
@@ -114,6 +115,8 @@ const AppInner: React.FC = () => {
   const [renameDirProgress, setRenameDirProgress] = useState<RenameDirectoryProgress | null>(null);
   /** 对象 ACL 弹窗目标(仅文件) */
   const [objectAclEntry, setObjectAclEntry] = useState<FileEntry | null>(null);
+  /** 文本编辑弹窗目标(仅可编辑的文本类文件) */
+  const [textEditEntry, setTextEditEntry] = useState<FileEntry | null>(null);
   /**
    * 复制 / 剪切剪贴板（内存态，不落盘）。
    * - `entries` 为列表快照；粘贴目标目录为当前 `prefix`（见 `handlePasteToCurrentDirectory`）。
@@ -455,6 +458,37 @@ const AppInner: React.FC = () => {
     setObjectAclEntry(null);
   }, []);
 
+  const handleOpenTextEdit = useCallback((entry: FileEntry) => {
+    if (entry.type !== 'file') return;
+    setTextEditEntry(entry);
+  }, []);
+
+  const handleFetchTextContent = useCallback(
+    (objectKey: string) => {
+      if (!client) {
+        return Promise.reject(new Error('未连接 OSS'));
+      }
+      return getObjectContent(client, objectKey);
+    },
+    [client],
+  );
+
+  const handleSaveTextContent = useCallback(
+    async (objectKey: string, content: string) => {
+      if (!client) {
+        throw new Error('未连接 OSS');
+      }
+      await putObjectContent(client, objectKey, content);
+      message.success('保存成功');
+      void refresh();
+    },
+    [client, message, refresh],
+  );
+
+  const handleTextEditorModalCancel = useCallback(() => {
+    setTextEditEntry(null);
+  }, []);
+
   /**
    * 打开重命名弹窗并记录目标条目
    */
@@ -616,6 +650,7 @@ const AppInner: React.FC = () => {
             onNavigate={navigate}
             onPreviewFile={handlePreviewFile}
             onDownloadFile={handleDownloadFile}
+            onEditFile={handleOpenTextEdit}
             onDelete={handleDelete}
             onRename={handleOpenRename}
             onGenerateUrl={handleGenerateUrl}
@@ -667,6 +702,14 @@ const AppInner: React.FC = () => {
         onFetchAcl={handleFetchObjectAcl}
         onSaveAcl={handleSaveObjectAcl}
         onCancel={handleObjectAclModalCancel}
+      />
+
+      <TextEditorModal
+        open={!!textEditEntry}
+        entry={textEditEntry}
+        onFetchContent={handleFetchTextContent}
+        onSaveContent={handleSaveTextContent}
+        onCancel={handleTextEditorModalCancel}
       />
 
       {/* 单文件/单目录重命名:表单仅收集新名称,OSS 侧见 services/oss.renameEntry */}

@@ -22,6 +22,7 @@ import {
   CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
+  EditOutlined,
   FormOutlined,
   LinkOutlined,
   MoreOutlined,
@@ -31,7 +32,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import type { TableRowSelection } from 'antd/es/table/interface';
 import type { FileEntry } from '@/types/oss';
-import { formatDateTime, formatFileSize } from '@/utils/format';
+import { formatDateTime, formatFileSize, isEditableTextFile, MAX_EDITABLE_TEXT_SIZE } from '@/utils/format';
 import { resolveFileIcon } from '@/components/fileIcon';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
@@ -58,6 +59,8 @@ export interface FileTableProps {
   onPreviewFile: (entry: FileEntry) => void;
   /** 操作列下载:带 attachment 的签名 URL,强制保存文件 */
   onDownloadFile: (entry: FileEntry) => void;
+  /** 编辑文本类文件 */
+  onEditFile: (entry: FileEntry) => void;
   /** 删除条目 */
   onDelete: (entry: FileEntry) => void;
   /** 重命名条目:打开弹窗或跳转至重命名流程,由父组件实现 */
@@ -82,6 +85,7 @@ export const FileTable: React.FC<FileTableProps> = ({
   onNavigate,
   onPreviewFile,
   onDownloadFile,
+  onEditFile,
   onDelete,
   onRename,
   onGenerateUrl,
@@ -167,6 +171,7 @@ export const FileTable: React.FC<FileTableProps> = ({
         }
 
         const isDirectory = record.type === 'directory';
+        const canEdit = !isDirectory && isEditableTextFile(record.name);
 
         /**
          * 目录重命名底层为「批量 copy + deleteMulti」,非原子操作,需弹框二次确认。
@@ -184,7 +189,7 @@ export const FileTable: React.FC<FileTableProps> = ({
 
         /**
          * 构建「更多」下拉菜单项。
-         * - 文件: 读写权限 / 重命名 / 剪切 / 复制 / 删除
+         * - 文件: 读写权限 / 编辑(文本类) / 重命名 / 剪切 / 复制 / 删除
          * - 目录: 剪切 / 复制 / 删除(重命名已固定到外层按钮)
          * 菜单项自身的 onClick 直接触发动作,无需在 label 内再嵌套按钮。
          */
@@ -200,6 +205,25 @@ export const FileTable: React.FC<FileTableProps> = ({
               onObjectAcl(record);
             },
           });
+          if (canEdit) {
+            overflowItems.push({
+              key: 'edit',
+              icon: <EditOutlined />,
+              label: '编辑',
+              onClick: ({ domEvent }) => {
+                domEvent.stopPropagation();
+                if (record.size > MAX_EDITABLE_TEXT_SIZE) {
+                  modal.warning({
+                    title: '文件过大，无法在线编辑',
+                    content: `文件大小为 ${formatFileSize(record.size)}，超过 ${MAX_EDITABLE_TEXT_SIZE / 1024 / 1024} MB 上限，请下载后本地编辑。`,
+                    okText: '知道了',
+                  });
+                  return;
+                }
+                onEditFile(record);
+              },
+            });
+          }
           overflowItems.push({
             key: 'rename',
             icon: <FormOutlined />,
