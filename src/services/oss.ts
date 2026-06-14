@@ -25,7 +25,7 @@ import type {
   PasteProgress,
   RenameDirectoryProgress,
 } from '@/types/oss';
-import { extractName } from '@/utils/format';
+import { extractName, MAX_EDITABLE_TEXT_SIZE } from '@/utils/format';
 
 /** 自 `constants/recycleBin` 再导出,便于外部仅从 `services/oss` 引用 OSS 与回收站约定 */
 export {
@@ -373,6 +373,101 @@ export function isPreviewable(objectKey: string): boolean {
   const name = objectKey.split('/').pop() ?? '';
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
   return PREVIEWABLE_EXTENSIONS.has(ext);
+}
+
+/** 根据扩展名推断文本类对象的 Content-Type */
+function guessTextMimeType(objectKey: string): string {
+  const ext = objectKey.split('.').pop()?.toLowerCase() ?? '';
+  const mimeMap: Record<string, string> = {
+    html: 'text/html; charset=utf-8',
+    css: 'text/css; charset=utf-8',
+    js: 'text/javascript; charset=utf-8',
+    json: 'application/json; charset=utf-8',
+    xml: 'application/xml; charset=utf-8',
+    csv: 'text/csv; charset=utf-8',
+    md: 'text/markdown; charset=utf-8',
+  };
+  return mimeMap[ext] ?? 'text/plain; charset=utf-8';
+}
+
+/**
+ * 对字节数组进行简单编码探测
+ * 优先检测 UTF-8 BOM，其次验证字节序列是否合法 UTF-8，
+ * 不合法则回退为 GBK（兼容国内常见的 GB2312/GBK 编码文本）。
+ */
+function detectEncoding(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+
+  // UTF-8 BOM: EF BB BF
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+    return 'utf-8';
+  }
+
+  // 验证前 4 KB 是否为合法 UTF-8 序列
+  const sampleLen = Math.min(bytes.length, 4096);
+  let i = 0;
+  while (i < sampleLen) {
+    const b = bytes[i];
+    let continuationCount = 0;
+    if (b <= 0x7F) {
+      i++;
+      continue;
+    } else if ((b & 0xE0) === 0xC0) {
+      continuationCount = 1;
+    } else if ((b & 0xF0) === 0xE0) {
+      continuationCount = 2;
+    } else if ((b & 0xF8) === 0xF0) {
+      continuationCount = 3;
+    } else {
+      return 'gbk';
+    }
+    for (let j = 1; j <= continuationCount; j++) {
+      if (i + j >= sampleLen || (bytes[i + j] & 0xC0) !== 0x80) {
+        return 'gbk';
+      }
+    }
+    i += 1 + continuationCount;
+  }
+  return 'utf-8';
+}
+
+/**
+ * 读取对象文本内容(用于在线编辑)
+ * 自动检测编码：优先 UTF-8，否则回退 GBK，兼容国内常见的非 UTF-8 文本文件。
+ *
+ * @throws 文件过大或读取失败时抛出 Error
+ */
+export async function getObjectContent(client: OSS, objectKey: string): Promise<string> {
+  try {
+    const result = await (client as OSS & {
+      get(key: string, options: Record<string, unknown>): Promise<{ content: ArrayBuffer }>;
+    }).get(objectKey, { responseType: 'arraybuffer' });
+    const buffer = result.content as ArrayBuffer;
+
+    if (buffer.byteLength > MAX_EDITABLE_TEXT_SIZE) {
+      throw new Error(`文件超过 ${MAX_EDITABLE_TEXT_SIZE / 1024 / 1024} MB，无法在线编辑`);
+    }
+
+    const encoding = detectEncoding(buffer);
+    return new TextDecoder(encoding).decode(buffer);
+  } catch (err) {
+    throw normalizeOSSBrowserError(err);
+  }
+}
+
+/**
+ * 将文本内容写回 OSS 对象(覆盖原文件)
+ */
+export async function putObjectContent(
+  client: OSS,
+  objectKey: string,
+  content: string,
+): Promise<void> {
+  try {
+    await client.put(objectKey, new Blob([content], { type: guessTextMimeType(objectKey) }));
+  } catch (err) {
+    throw normalizeOSSBrowserError(err);
+  }
 }
 
 /**
