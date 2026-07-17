@@ -9,6 +9,7 @@ import { Modal, Input, App, Spin } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
 import type { FileEntry } from '@/types/oss';
 import { formatFileSize } from '@/utils/format';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 export interface TextEditorModalProps {
   open: boolean;
@@ -26,6 +27,7 @@ export const TextEditorModal: React.FC<TextEditorModalProps> = ({
   onCancel,
 }) => {
   const { message } = App.useApp();
+  const isMobile = useIsMobile();
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -92,13 +94,16 @@ export const TextEditorModal: React.FC<TextEditorModalProps> = ({
       cancelText="取消"
       confirmLoading={saving}
       okButtonProps={{ disabled: loading }}
-      width={800}
+      width={isMobile ? 'calc(100vw - 24px)' : 800}
+      style={isMobile ? { top: 12, maxWidth: 'calc(100vw - 24px)' } : undefined}
       destroyOnHidden
     >
       {entry && entry.type === 'file' && (
-        <div className="mb-3 text-sm text-muted">
-          文件：<span className="text-ink">{entry.name}</span>
-          <span className="ml-3">大小：{formatFileSize(entry.size)}</span>
+        <div className="mb-3 flex flex-col gap-1 text-sm text-muted md:flex-row md:gap-0">
+          <span>
+            文件：<span className="break-all text-ink">{entry.name}</span>
+          </span>
+          <span className="md:ml-3">大小：{formatFileSize(entry.size)}</span>
         </div>
       )}
 
@@ -106,7 +111,7 @@ export const TextEditorModal: React.FC<TextEditorModalProps> = ({
         <Input.TextArea
           value={content}
           onChange={(e) => setContent(e.target.value)}
-          autoSize={{ minRows: 16, maxRows: 24 }}
+          autoSize={{ minRows: isMobile ? 12 : 16, maxRows: isMobile ? 18 : 24 }}
           className="font-mono text-sm"
           placeholder={loading ? '正在加载...' : '文件内容'}
           disabled={loading}

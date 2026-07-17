@@ -13,6 +13,7 @@ import {
 } from '@ant-design/icons';
 import type { UploadTask } from '@/types/oss';
 import { formatFileSize } from '@/utils/format';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 type UploadTab = 'active' | 'done' | 'failed';
 
@@ -72,6 +73,7 @@ export const UploadDrawer: React.FC<UploadDrawerProps> = ({
   uploading,
   onClearCompleted,
 }) => {
+  const isMobile = useIsMobile();
   const { active, done, failed } = useMemo(() => {
     const active = tasks.filter((t) => t.status === 'waiting' || t.status === 'uploading');
     const done = tasks.filter((t) => t.status === 'success');
@@ -152,7 +154,7 @@ export const UploadDrawer: React.FC<UploadDrawerProps> = ({
         </Space>
       }
       placement="right"
-      width={380}
+      width={isMobile ? '100%' : 380}
       open={open}
       onClose={onClose}
       footer={

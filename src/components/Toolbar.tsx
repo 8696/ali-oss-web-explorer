@@ -4,7 +4,7 @@
  * 文件浏览器顶部的操作工具栏。
  * 集成:上传、新建文件夹、多选模式、批量剪切/复制与粘贴到当前目录(粘贴前 Popconfirm)、批量删除(经 {@link DeleteConfirmModal} 二次确认)、刷新、OSS 配置入口。
  * 批量删除失败时不关闭确认弹窗,由父组件 `onBulkDelete` 抛错;成功时本组件在 `onConfirm` 内关闭弹窗。
- * 使用 Ant Design 的 Space 与 Button 实现,间距由 Tailwind 控制。
+ * 移动端以图标按钮为主,减少横向占位;桌面端保留完整文案。
  */
 
 import React, { useRef, useState } from 'react';
@@ -21,6 +21,7 @@ import {
   SnippetsOutlined,
 } from '@ant-design/icons';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 export interface ToolbarProps {
   /** 是否已连接 */
@@ -81,6 +82,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   pasteIsMove,
   onPaste,
 }) => {
+  const isMobile = useIsMobile();
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** 批量删除确认弹窗开关;打开时由 {@link DeleteConfirmModal} 要求用户输入「确定删除」 */
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
@@ -112,8 +114,15 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       : '选中了「回收站」系统文件夹，无法复制或剪切'
     : undefined;
 
+  const selectLabel = selectionMode ? '取消选择' : '选择文件';
+  const selectTooltip = selectionMode
+    ? selectedCount > 0
+      ? `取消选择（已选 ${selectedCount}）`
+      : '取消选择'
+    : '选择文件';
+
   return (
-    <div className="toolbar-panel flex items-center justify-between gap-3 flex-wrap">
+    <div className="toolbar-panel flex items-center justify-between gap-2 flex-wrap md:gap-3">
       <DeleteConfirmModal
         open={bulkDeleteOpen}
         title={bulkDeleteTitle}
@@ -128,69 +137,93 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           }
         }}
       />
-      <Space size={8} className="toolbar-actions">
-        <Button
-          type="primary"
-          icon={<CloudUploadOutlined />}
-          disabled={!connected}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          上传文件
-        </Button>
-        <Button
-          icon={<FolderAddOutlined />}
-          disabled={!connected}
-          onClick={onCreateFolder}
-        >
-          新建文件夹
-        </Button>
-        <Button
-          icon={<CheckSquareOutlined />}
-          disabled={!connected}
-          onClick={onToggleSelectionMode}
-        >
-          {selectionMode ? '取消选择' : '选择文件'}
-        </Button>
+      <Space size={isMobile ? 6 : 8} className="toolbar-actions flex-wrap" wrap>
+        <Tooltip title={isMobile ? '上传文件' : undefined}>
+          <Button
+            type="primary"
+            icon={<CloudUploadOutlined />}
+            disabled={!connected}
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="上传文件"
+          >
+            {isMobile ? null : '上传文件'}
+          </Button>
+        </Tooltip>
+        <Tooltip title={isMobile ? '新建文件夹' : undefined}>
+          <Button
+            icon={<FolderAddOutlined />}
+            disabled={!connected}
+            onClick={onCreateFolder}
+            aria-label="新建文件夹"
+          >
+            {isMobile ? null : '新建文件夹'}
+          </Button>
+        </Tooltip>
+        <Tooltip title={isMobile ? selectTooltip : undefined}>
+          <Button
+            icon={<CheckSquareOutlined />}
+            disabled={!connected}
+            onClick={onToggleSelectionMode}
+            aria-label={selectTooltip}
+          >
+            {isMobile ? null : selectLabel}
+          </Button>
+        </Tooltip>
         {/* 多选模式下批量写入剪贴板；禁用态需包一层 span，Tooltip 才能绑定到禁用按钮上 */}
         {selectionMode &&
           (bulkClipboardDisabled ? (
             <Tooltip title={bulkClipboardTooltip}>
               <span className="inline-flex gap-1">
-                <Button icon={<ScissorOutlined />} disabled>
-                  {`剪切已选（${selectedCount}）`}
+                <Button icon={<ScissorOutlined />} disabled aria-label="剪切已选">
+                  {isMobile ? null : `剪切已选（${selectedCount}）`}
                 </Button>
-                <Button icon={<CopyOutlined />} disabled>
-                  {`复制已选（${selectedCount}）`}
+                <Button icon={<CopyOutlined />} disabled aria-label="复制已选">
+                  {isMobile ? null : `复制已选（${selectedCount}）`}
                 </Button>
               </span>
             </Tooltip>
           ) : (
             <>
-              <Button icon={<ScissorOutlined />} onClick={onBulkCut}>
-                {`剪切已选（${selectedCount}）`}
-              </Button>
-              <Button icon={<CopyOutlined />} onClick={onBulkCopy}>
-                {`复制已选（${selectedCount}）`}
-              </Button>
+              <Tooltip title={isMobile ? `剪切已选（${selectedCount}）` : undefined}>
+                <Button
+                  icon={<ScissorOutlined />}
+                  onClick={onBulkCut}
+                  aria-label={`剪切已选（${selectedCount}）`}
+                >
+                  {isMobile ? null : `剪切已选（${selectedCount}）`}
+                </Button>
+              </Tooltip>
+              <Tooltip title={isMobile ? `复制已选（${selectedCount}）` : undefined}>
+                <Button
+                  icon={<CopyOutlined />}
+                  onClick={onBulkCopy}
+                  aria-label={`复制已选（${selectedCount}）`}
+                >
+                  {isMobile ? null : `复制已选（${selectedCount}）`}
+                </Button>
+              </Tooltip>
             </>
           ))}
         {selectionMode &&
           (bulkDeleteDisabled ? (
             <Tooltip title={bulkDeleteTooltip}>
               <span className="inline-block">
-                <Button danger icon={<DeleteOutlined />} disabled>
-                  {`删除已选（${selectedCount}）`}
+                <Button danger icon={<DeleteOutlined />} disabled aria-label="删除已选">
+                  {isMobile ? null : `删除已选（${selectedCount}）`}
                 </Button>
               </span>
             </Tooltip>
           ) : (
-            <Button
-              danger
-              icon={<DeleteOutlined />}
-              onClick={() => setBulkDeleteOpen(true)}
-            >
-              {`删除已选（${selectedCount}）`}
-            </Button>
+            <Tooltip title={isMobile ? `删除已选（${selectedCount}）` : undefined}>
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                onClick={() => setBulkDeleteOpen(true)}
+                aria-label={`删除已选（${selectedCount}）`}
+              >
+                {isMobile ? null : `删除已选（${selectedCount}）`}
+              </Button>
+            </Tooltip>
           ))}
         {/* 有剪贴板内容即显示；粘贴目标固定为当前列表目录（由 App 传入的 prefix），未连接时禁用 */}
         {clipboardReady && (
@@ -207,8 +240,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               disabled={!connected}
               onConfirm={() => void onPaste()}
             >
-              <Button icon={<SnippetsOutlined />} disabled={!connected}>
-                粘贴
+              <Button icon={<SnippetsOutlined />} disabled={!connected} aria-label="粘贴">
+                {isMobile ? null : '粘贴'}
               </Button>
             </Popconfirm>
           </Tooltip>
@@ -218,6 +251,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             icon={<ReloadOutlined />}
             disabled={!connected}
             onClick={onRefresh}
+            aria-label="刷新当前目录"
           />
         </Tooltip>
       </Space>
@@ -225,11 +259,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       <Tooltip title="OSS 连接配置">
         <Button
           type="text"
-          className="rounded-xl px-3 text-muted hover:!bg-hover hover:!text-ink"
+          className="rounded-xl px-2 text-muted hover:!bg-hover hover:!text-ink md:px-3"
           icon={<SettingOutlined />}
           onClick={onOpenConfig}
+          aria-label="连接配置"
         >
-          连接配置
+          {isMobile ? null : '连接配置'}
         </Button>
       </Tooltip>
 

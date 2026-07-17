@@ -23,6 +23,7 @@ import {
   SettingOutlined,
 } from '@ant-design/icons';
 import type { OSSConfig } from '@/types/oss';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 export interface ConfigModalProps {
   /** 弹窗是否可见 */
@@ -63,6 +64,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
   onConnect,
   onDisconnect,
 }) => {
+  const isMobile = useIsMobile();
   const [form] = Form.useForm<ConfigFormValues>();
 
   // 当已有配置(比如从 localStorage 恢复)时,填充到表单中
@@ -116,7 +118,7 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
           <span>OSS 连接配置</span>
         </Space>
       }
-      width={420}
+      width={isMobile ? 'calc(100vw - 32px)' : 420}
       open={open}
       onCancel={connected ? onClose : undefined}
       closable={connected}
