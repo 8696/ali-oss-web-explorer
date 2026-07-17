@@ -39,6 +39,7 @@ import type {
   RenameDirectoryProgress,
 } from '@/types/oss';
 import { extractName } from '@/utils/format';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 const { Header, Content } = Layout;
 
@@ -48,6 +49,7 @@ const { Header, Content } = Layout;
  */
 const AppInner: React.FC = () => {
   const { message } = AntdApp.useApp();
+  const isMobile = useIsMobile();
 
   // ====== 状态管理 ======
   const { config, setConfig, clearConfig } = useOSSConfig();
@@ -576,30 +578,31 @@ const AppInner: React.FC = () => {
       <Header
         className="app-shell__header flex items-center justify-between border-b border-line/80 bg-paper/90 backdrop-blur"
       >
-        <div className="app-shell__brand flex items-center gap-4 leading-none">
+        <div className="app-shell__brand flex min-w-0 items-center gap-3 leading-none md:gap-4">
           <div className="app-shell__brand-mark flex items-center justify-center bg-primary/10 text-primary">
-            <CloudServerOutlined style={{ fontSize: 20 }} />
+            <CloudServerOutlined style={{ fontSize: isMobile ? 18 : 20 }} />
           </div>
-          <div className="app-shell__brand-copy flex flex-col justify-center gap-1">
-            <span className="text-[20px] font-semibold tracking-[0.01em] text-ink">
+          <div className="app-shell__brand-copy flex min-w-0 flex-col justify-center gap-0.5 md:gap-1">
+            <span className="truncate text-[17px] font-semibold tracking-[0.01em] text-ink md:text-[20px]">
               OSS 文件管理
             </span>
             {connected && config && (
-              <span className="app-shell__meta text-sm text-muted">
+              <span className="app-shell__meta truncate text-xs text-muted md:text-sm">
                 {config.bucket} · {config.region}
               </span>
             )}
           </div>
         </div>
 
-        <div className="app-shell__header-actions flex items-center gap-2">
+        <div className="app-shell__header-actions flex shrink-0 items-center gap-2">
           {/* 上传任务入口(有任务时显示角标) */}
           <Badge dot={uploading} offset={[-4, 4]}>
             <Button
               type="text"
-              className="rounded-xl px-3 text-muted hover:!bg-hover hover:!text-ink"
+              className="rounded-xl px-2 text-muted hover:!bg-hover hover:!text-ink md:px-3"
               icon={<CloudUploadOutlined />}
               onClick={() => setUploadOpen(true)}
+              aria-label="上传任务"
             >
               {tasks.length > 0 ? `${tasks.length}` : ''}
             </Button>
@@ -607,7 +610,7 @@ const AppInner: React.FC = () => {
         </div>
       </Header>
 
-      <Content className="app-shell__content flex flex-col gap-4 overflow-hidden px-6 py-5">
+      <Content className="app-shell__content flex flex-col gap-3 overflow-hidden px-3 py-3 md:gap-4 md:px-6 md:py-5">
         <Toolbar
           connected={connected}
           selectionMode={selectionMode}

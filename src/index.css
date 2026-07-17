@@ -362,3 +362,146 @@ body {
 .ant-progress-bg {
   transition: width 0.3s ease;
 }
+
+/* ====== 移动端适配（< 768px，与 useIsMobile / Tailwind md 一致） ====== */
+@media (max-width: 767px) {
+  .app-shell__header {
+    min-height: 60px;
+    height: 60px;
+    padding: 0 12px;
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
+
+  .app-shell__brand-mark {
+    width: 36px;
+    height: 36px;
+    border-radius: 12px;
+  }
+
+  .app-shell__brand-copy {
+    min-height: 36px;
+  }
+
+  .app-shell__header-actions .ant-btn {
+    height: 36px;
+    min-width: 36px;
+  }
+
+  .app-shell__content {
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .toolbar-panel,
+  .breadcrumbs-panel,
+  .modern-file-table {
+    border-radius: 14px;
+  }
+
+  .toolbar-panel {
+    padding: 10px 12px;
+  }
+
+  .toolbar-panel .ant-btn {
+    min-height: 36px;
+    padding-inline: 10px;
+  }
+
+  .toolbar-panel .ant-btn.ant-btn-icon-only {
+    min-width: 36px;
+    padding-inline: 8px;
+  }
+
+  .breadcrumbs-panel {
+    padding: 10px 12px;
+  }
+
+  .breadcrumbs-trail-scroll {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .breadcrumbs-trail-scroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  .modern-file-table .ant-table-thead > tr > th {
+    font-size: 12px;
+    padding-block: 10px !important;
+    padding-inline: 10px !important;
+  }
+
+  .modern-file-table .ant-table-tbody > tr > td {
+    padding-block: 10px !important;
+    padding-inline: 10px !important;
+  }
+
+  .modern-file-table .ant-table-selection-column {
+    width: 40px !important;
+    min-width: 40px !important;
+    max-width: 40px !important;
+    padding-inline: 4px !important;
+  }
+
+  .file-row-trigger {
+    gap: 8px;
+    min-height: 30px;
+  }
+
+  .file-icon-chip {
+    width: 28px;
+    height: 28px;
+    border-radius: 10px;
+  }
+
+  .file-name {
+    font-size: 14px;
+  }
+
+  .file-actions {
+    padding-right: 0;
+    gap: 0;
+  }
+
+  .modern-file-table .ant-empty {
+    margin-block: 36px;
+  }
+
+  /* 弹窗在窄屏留边，避免贴边或溢出 */
+  .oss-modal.ant-modal,
+  .ant-modal.oss-modal {
+    max-width: calc(100vw - 24px) !important;
+  }
+
+  .oss-modal .ant-modal-header,
+  .oss-modal .ant-modal-body,
+  .oss-modal .ant-modal-footer {
+    padding-inline: 16px;
+  }
+
+  .oss-modal .ant-modal-header {
+    padding-block: 14px 10px;
+  }
+
+  .oss-modal .ant-modal-body {
+    padding: 4px 16px 16px;
+  }
+
+  .oss-modal .ant-modal-footer {
+    padding: 12px 16px 14px;
+  }
+
+  .oss-drawer .ant-drawer-header,
+  .upload-drawer .ant-drawer-header,
+  .oss-drawer .ant-drawer-body,
+  .upload-drawer .ant-drawer-body {
+    padding-inline: 16px;
+  }
+
+  .oss-drawer .ant-drawer-body,
+  .upload-drawer .ant-drawer-body {
+    padding-block: 16px;
+  }
+}

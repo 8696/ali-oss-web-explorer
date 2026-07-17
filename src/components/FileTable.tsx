@@ -3,7 +3,7 @@
  *
  * 文件浏览器核心组件。
  * 使用 Ant Design Table 展示当前目录下的文件和子目录。
- * 支持单击目录进入下级、单击文件名预览、操作列下载、链接、ACL、删除与重命名。
+ * 支持单击目录进入下级、单击文件名预览;行内操作统一收进图标下拉菜单。
  *
  * 回收站相关:
  *   - 桶根系统目录「回收站」操作列为空(无按钮);多选时不可勾选;
@@ -15,7 +15,7 @@
  *   - 行为(导航、下载、删除、重命名)通过 props 的回调上报给父组件。
  */
 
-import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Table, Button, Typography, Empty, Dropdown, App as AntdApp } from 'antd';
 import type { MenuProps } from 'antd';
 import {
@@ -24,8 +24,8 @@ import {
   DownloadOutlined,
   EditOutlined,
   FormOutlined,
+  EllipsisOutlined,
   LinkOutlined,
-  MoreOutlined,
   SafetyCertificateOutlined,
   ScissorOutlined,
 } from '@ant-design/icons';
@@ -36,6 +36,7 @@ import { formatDateTime, formatFileSize, isEditableTextFile, MAX_EDITABLE_TEXT_S
 import { resolveFileIcon } from '@/components/fileIcon';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 /** 虚拟列表 tbody 最小滚动高度(px)，低于此值体验较差 */
 const VIRTUAL_BODY_MIN = 160;
@@ -93,6 +94,7 @@ export const FileTable: React.FC<FileTableProps> = ({
   onCopyEntry,
   onCutEntry,
 }) => {
+  const isMobile = useIsMobile();
   const tableWrapRef = useRef<HTMLDivElement>(null);
   /** 传给 Table scroll.y，决定虚拟列表可视区域高度 */
   const [bodyScrollY, setBodyScrollY] = useState(VIRTUAL_BODY_MIN);
@@ -114,8 +116,8 @@ export const FileTable: React.FC<FileTableProps> = ({
     [selectionMode, onNavigate, onPreviewFile],
   );
 
-  const columns: ColumnsType<FileEntry> = [
-    {
+  const columns: ColumnsType<FileEntry> = useMemo(() => {
+    const nameColumn: ColumnsType<FileEntry>[number] = {
       title: '名称',
       dataIndex: 'name',
       key: 'name',
@@ -135,8 +137,9 @@ export const FileTable: React.FC<FileTableProps> = ({
           </span>
         );
       },
-    },
-    {
+    };
+
+    const sizeColumn: ColumnsType<FileEntry>[number] = {
       title: '大小',
       dataIndex: 'size',
       key: 'size',
@@ -147,8 +150,9 @@ export const FileTable: React.FC<FileTableProps> = ({
           {record.type === 'directory' ? '-' : formatFileSize(size)}
         </span>
       ),
-    },
-    {
+    };
+
+    const modifiedColumn: ColumnsType<FileEntry>[number] = {
       title: '修改时间',
       dataIndex: 'lastModified',
       key: 'lastModified',
@@ -158,11 +162,12 @@ export const FileTable: React.FC<FileTableProps> = ({
           {record.type === 'directory' ? '-' : formatDateTime(val)}
         </span>
       ),
-    },
-    {
-      title: '操作',
+    };
+
+    const actionColumn: ColumnsType<FileEntry>[number] = {
+      title: '',
       key: 'action',
-      width: 260,
+      width: 48,
       align: 'right',
       render: (_: unknown, record: FileEntry) => {
         /* 桶根「回收站」系统目录不展示任何操作按钮 */
@@ -188,25 +193,54 @@ export const FileTable: React.FC<FileTableProps> = ({
         };
 
         /**
-         * 构建「更多」下拉菜单项。
-         * - 文件: 读写权限 / 编辑(文本类) / 重命名 / 剪切 / 复制 / 删除
-         * - 目录: 剪切 / 复制 / 删除(重命名已固定到外层按钮)
-         * 菜单项自身的 onClick 直接触发动作,无需在 label 内再嵌套按钮。
+         * 全部操作收进同一下拉菜单;入口仅用 ellipsis 图标。
+         * - 文件: 下载 / 生成链接 / 读写权限 / 编辑(文本类) / 重命名 / 剪切 / 复制 / 删除
+         * - 目录: 重命名 / 剪切 / 复制 / 删除
          */
-        const overflowItems: MenuProps['items'] = [];
+        const menuItems: MenuProps['items'] = [];
 
-        if (!isDirectory) {
-          overflowItems.push({
-            key: 'acl',
-            icon: <SafetyCertificateOutlined />,
-            label: '读写权限',
+        if (isDirectory) {
+          menuItems.push({
+            key: 'rename',
+            icon: <FormOutlined />,
+            label: '重命名',
             onClick: ({ domEvent }) => {
               domEvent.stopPropagation();
-              onObjectAcl(record);
+              triggerDirectoryRename();
             },
           });
+        } else {
+          menuItems.push(
+            {
+              key: 'download',
+              icon: <DownloadOutlined />,
+              label: '下载',
+              onClick: ({ domEvent }) => {
+                domEvent.stopPropagation();
+                onDownloadFile(record);
+              },
+            },
+            {
+              key: 'link',
+              icon: <LinkOutlined />,
+              label: '生成链接',
+              onClick: ({ domEvent }) => {
+                domEvent.stopPropagation();
+                onGenerateUrl(record);
+              },
+            },
+            {
+              key: 'acl',
+              icon: <SafetyCertificateOutlined />,
+              label: '读写权限',
+              onClick: ({ domEvent }) => {
+                domEvent.stopPropagation();
+                onObjectAcl(record);
+              },
+            },
+          );
           if (canEdit) {
-            overflowItems.push({
+            menuItems.push({
               key: 'edit',
               icon: <EditOutlined />,
               label: '编辑',
@@ -224,7 +258,7 @@ export const FileTable: React.FC<FileTableProps> = ({
               },
             });
           }
-          overflowItems.push({
+          menuItems.push({
             key: 'rename',
             icon: <FormOutlined />,
             label: '重命名',
@@ -235,105 +269,84 @@ export const FileTable: React.FC<FileTableProps> = ({
           });
         }
 
-        overflowItems.push({
-          key: 'cut',
-          icon: <ScissorOutlined />,
-          label: '剪切',
-          onClick: ({ domEvent }) => {
-            domEvent.stopPropagation();
-            if (isDirectory) {
-              modal.confirm({
-                title: '确认剪切该文件夹?',
-                content:
-                  '将通过复制后删除源路径完成移动；对象较多时耗时较长，中途失败可能在新旧路径下残留部分对象。',
-                okText: '继续',
-                cancelText: '取消',
-                onOk: () => onCutEntry(record),
-              });
-            } else {
-              onCutEntry(record);
-            }
+        menuItems.push(
+          {
+            key: 'cut',
+            icon: <ScissorOutlined />,
+            label: '剪切',
+            onClick: ({ domEvent }) => {
+              domEvent.stopPropagation();
+              if (isDirectory) {
+                modal.confirm({
+                  title: '确认剪切该文件夹?',
+                  content:
+                    '将通过复制后删除源路径完成移动；对象较多时耗时较长，中途失败可能在新旧路径下残留部分对象。',
+                  okText: '继续',
+                  cancelText: '取消',
+                  onOk: () => onCutEntry(record),
+                });
+              } else {
+                onCutEntry(record);
+              }
+            },
           },
-        });
-
-        overflowItems.push({
-          key: 'copy',
-          icon: <CopyOutlined />,
-          label: '复制',
-          onClick: ({ domEvent }) => {
-            domEvent.stopPropagation();
-            onCopyEntry(record);
+          {
+            key: 'copy',
+            icon: <CopyOutlined />,
+            label: '复制',
+            onClick: ({ domEvent }) => {
+              domEvent.stopPropagation();
+              onCopyEntry(record);
+            },
           },
-        });
-
-        overflowItems.push({ type: 'divider', key: 'divider-before-delete' });
-
-        overflowItems.push({
-          key: 'delete',
-          icon: <DeleteOutlined />,
-          label: '删除',
-          danger: true,
-          onClick: ({ domEvent }) => {
-            domEvent.stopPropagation();
-            setDeleteTarget(record);
+          { type: 'divider', key: 'divider-before-delete' },
+          {
+            key: 'delete',
+            icon: <DeleteOutlined />,
+            label: '删除',
+            danger: true,
+            onClick: ({ domEvent }) => {
+              domEvent.stopPropagation();
+              setDeleteTarget(record);
+            },
           },
-        });
+        );
 
         return (
           <div className="file-actions">
-            {isDirectory ? (
+            <Dropdown
+              menu={{ items: menuItems }}
+              trigger={['click']}
+              placement="bottomRight"
+            >
               <Button
                 type="text"
                 size="small"
-                icon={<FormOutlined />}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  triggerDirectoryRename();
-                }}
-              >
-                重命名
-              </Button>
-            ) : (
-              <>
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<DownloadOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDownloadFile(record);
-                  }}
-                >
-                  下载
-                </Button>
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<LinkOutlined />}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onGenerateUrl(record);
-                  }}
-                >
-                  生成链接
-                </Button>
-              </>
-            )}
-            <Dropdown menu={{ items: overflowItems }} trigger={['hover']} placement="bottomRight">
-              <Button
-                type="text"
-                size="small"
-                icon={<MoreOutlined />}
+                icon={<EllipsisOutlined />}
                 onClick={(e) => e.stopPropagation()}
-              >
-                更多
-              </Button>
+                aria-label="操作"
+              />
             </Dropdown>
           </div>
         );
       },
-    },
-  ];
+    };
+
+    return isMobile
+      ? [nameColumn, actionColumn]
+      : [nameColumn, sizeColumn, modifiedColumn, actionColumn];
+  }, [
+    handleRowClick,
+    isMobile,
+    modal,
+    onCopyEntry,
+    onCutEntry,
+    onDownloadFile,
+    onEditFile,
+    onGenerateUrl,
+    onObjectAcl,
+    onRename,
+  ]);
 
   /** 多选模式下为表格启用行选择;系统「回收站」行禁止勾选,与批量删除禁用规则一致 */
   const rowSelection: TableRowSelection<FileEntry> | undefined = selectionMode
@@ -373,7 +386,7 @@ export const FileTable: React.FC<FileTableProps> = ({
 
   useLayoutEffect(() => {
     requestAnimationFrame(measureBodyScrollY);
-  }, [entries.length, loading, selectionMode, connected, measureBodyScrollY]);
+  }, [entries.length, loading, selectionMode, connected, isMobile, measureBodyScrollY]);
 
   return (
     <>
@@ -408,7 +421,7 @@ export const FileTable: React.FC<FileTableProps> = ({
         rowKey="key"
         rowSelection={rowSelection}
         loading={loading}
-        size="middle"
+        size={isMobile ? 'small' : 'middle'}
         pagination={false}
         virtual
         scroll={{ y: bodyScrollY }}
@@ -420,9 +433,15 @@ export const FileTable: React.FC<FileTableProps> = ({
             <Empty
               description={
                 <Typography.Text type="secondary">
-                  请先点击右上角
-                  <SettingOutlined className="mx-1" />
-                  配置 OSS 连接
+                  {isMobile ? (
+                    <>请先点击工具栏「连接配置」完成 OSS 连接</>
+                  ) : (
+                    <>
+                      请先点击右上角
+                      <SettingOutlined className="mx-1" />
+                      配置 OSS 连接
+                    </>
+                  )}
                 </Typography.Text>
               }
             />
