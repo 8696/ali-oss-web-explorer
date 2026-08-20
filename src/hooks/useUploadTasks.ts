@@ -35,13 +35,24 @@ export interface UseUploadTasksOptions {
   onBatchComplete?: (result: UploadBatchResult) => void;
 }
 
+/** 待加入上传队列的单个文件及其相对路径 */
+export interface UploadFileInput {
+  /** 原始文件对象 */
+  file: File;
+  /**
+   * 相对于目标目录的路径,可包含子文件夹(如拖拽上传文件夹时的 "sub/a.txt");
+   * 省略时默认为 `file.name`(即普通选择文件上传到当前目录顶层)。
+   */
+  relativePath?: string;
+}
+
 export interface UseUploadTasksResult {
   /** 当前所有的上传任务 */
   tasks: UploadTask[];
   /** 是否还有任务在执行中 */
   uploading: boolean;
-  /** 添加一组文件到上传队列 */
-  enqueue: (files: File[], targetPrefix: string) => void;
+  /** 添加一组文件到上传队列;`relativePath` 缺省时使用 `file.name`(不含子路径) */
+  enqueue: (files: UploadFileInput[], targetPrefix: string) => void;
   /** 清除已完成(成功/失败/取消)的任务 */
   clearCompleted: () => void;
 }
@@ -180,16 +191,16 @@ export function useUploadTasks(client: OSS | null, options: UseUploadTasksOption
 
   /**
    * 添加文件到上传队列
-   * @param files 浏览器原生 File 对象数组
+   * @param files 待上传文件及其相对路径(拖拽文件夹时用于保留子目录结构)
    * @param targetPrefix 上传到哪个目录(以 / 结尾,根目录为 '')
    */
-  const enqueue = useCallback((files: File[], targetPrefix: string) => {
+  const enqueue = useCallback((files: UploadFileInput[], targetPrefix: string) => {
     if (files.length === 0) return;
     const batchId = generateId();
-    const newTasks: UploadTask[] = files.map((file) => ({
+    const newTasks: UploadTask[] = files.map(({ file, relativePath }) => ({
       id: generateId(),
       file,
-      objectKey: `${targetPrefix}${file.name}`,
+      objectKey: `${targetPrefix}${relativePath ?? file.name}`,
       progress: 0,
       status: 'waiting',
       batchId,

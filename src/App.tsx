@@ -10,6 +10,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App as AntdApp, Layout, Button, Badge, ConfigProvider, theme } from 'antd';
+import zhCN from 'antd/locale/zh_CN';
 import {
   CloudServerOutlined,
   CloudUploadOutlined,
@@ -29,16 +30,29 @@ import { ObjectAclModal } from '@/components/ObjectAclModal';
 import { PasteProgressModal, buildInitialPasteProgress } from '@/components/PasteProgressModal';
 import { TextEditorModal } from '@/components/TextEditorModal';
 import { RenameModal } from '@/components/RenameModal';
+import { ZipDownloadProgressModal } from '@/components/ZipDownloadProgressModal';
 import { RECYCLE_BIN_FOLDER, isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
-import { getObjectAcl, getObjectContent, getSignedAccessUrl, getSignedUrl, putObjectAcl, putObjectContent } from '@/services/oss';
+import {
+  buildZipFromEntries,
+  ensureDirectoryPlaceholder,
+  getObjectAcl,
+  getObjectContent,
+  getSignedAccessUrl,
+  getSignedUrl,
+  putObjectAcl,
+  putObjectContent,
+  triggerBlobDownload,
+} from '@/services/oss';
 import type {
   FileClipboardState,
   FileEntry,
   ObjectAcl,
   PasteProgress,
   RenameDirectoryProgress,
+  ZipDownloadProgress,
 } from '@/types/oss';
 import { extractName } from '@/utils/format';
+import type { ResolvedDropPayload } from '@/utils/dragDropUpload';
 import { useIsMobile } from '@/hooks/useIsMobile';
 
 const { Header, Content } = Layout;
@@ -119,6 +133,12 @@ const AppInner: React.FC = () => {
   const [objectAclEntry, setObjectAclEntry] = useState<FileEntry | null>(null);
   /** 文本编辑弹窗目标(仅可编辑的文本类文件) */
   const [textEditEntry, setTextEditEntry] = useState<FileEntry | null>(null);
+  /** 当前目录文件名搜索关键字(前端过滤 entries,不发起新的 OSS 列举请求) */
+  const [searchKeyword, setSearchKeyword] = useState('');
+  /** 打包下载(zip)进行中时置 true，驱动 {@link ZipDownloadProgressModal} */
+  const [zipModalOpen, setZipModalOpen] = useState(false);
+  /** 弹窗内展示的打包下载进度 */
+  const [zipProgress, setZipProgress] = useState<ZipDownloadProgress | null>(null);
   /**
    * 复制 / 剪切剪贴板（内存态，不落盘）。
    * - `entries` 为列表快照；粘贴目标目录为当前 `prefix`（见 `handlePasteToCurrentDirectory`）。
@@ -163,6 +183,16 @@ const AppInner: React.FC = () => {
   }, [entries]);
 
   /**
+   * 当前目录下经搜索关键字过滤后的展示列表(前端过滤,不影响 `directoryStats` 等基于全量 entries 的统计)
+   * 关键字为空时直接返回原列表引用,避免不必要的重新渲染。
+   */
+  const displayedEntries = useMemo(() => {
+    const kw = searchKeyword.trim().toLowerCase();
+    if (!kw) return entries;
+    return entries.filter((entry) => entry.name.toLowerCase().includes(kw));
+  }, [entries, searchKeyword]);
+
+  /**
    * 当前多选模式下、与 `selectedRowKeys` 对应的完整条目列表
    * (用于批量删除入参及是否包含目录/系统回收站的判断)
    */
@@ -192,6 +222,16 @@ const AppInner: React.FC = () => {
    * （与 `bulkDeleteDisabled` 规则一致：避免误操作系统虚拟目录）
    */
   const bulkClipboardDisabled = useMemo(
+    () =>
+      selectedCount === 0 || selectedEntries.some((entry) => isRecycleBinDirectoryEntry(entry)),
+    [selectedCount, selectedEntries],
+  );
+
+  /**
+   * 无选中项，或选中项中含桶根「回收站」系统目录时禁用批量打包下载
+   * （规则与批量复制/剪切一致：避免误打包系统虚拟目录）
+   */
+  const bulkZipDownloadDisabled = useMemo(
     () =>
       selectedCount === 0 || selectedEntries.some((entry) => isRecycleBinDirectoryEntry(entry)),
     [selectedCount, selectedEntries],
@@ -297,15 +337,86 @@ const AppInner: React.FC = () => {
   }, [clipboard, onPasteProgressThrottled, pasteClipboard, message, prefix]);
 
   /**
-   * 上传文件:添加到上传队列并打开上传面板
+   * 上传文件:添加到上传队列并打开上传面板(工具栏「上传文件」入口,浏览器文件选择器不支持整文件夹)
    */
   const handleUpload = useCallback(
     (files: File[]) => {
-      enqueue(files, prefix);
+      enqueue(files.map((file) => ({ file })), prefix);
       setUploadOpen(true);
     },
     [enqueue, prefix],
   );
+
+  /**
+   * 拖拽上传(支持整个文件夹):`FileTable` 已递归展开为文件列表(含相对路径)与空文件夹列表。
+   * - 文件部分复用与普通上传相同的队列,`relativePath` 会拼接出带子目录的完整对象 Key;
+   * - 空文件夹逐个写入目录占位对象(与「新建文件夹」写法一致),全部完成后统一提示并刷新列表;
+   *   占位创建失败不影响已入队的文件上传(两者互不阻塞)。
+   */
+  const handleDropUpload = useCallback(
+    (payload: ResolvedDropPayload) => {
+      if (payload.files.length > 0) {
+        enqueue(payload.files, prefix);
+        setUploadOpen(true);
+      }
+      if (payload.emptyFolders.length > 0 && client) {
+        void Promise.all(
+          payload.emptyFolders.map((folder) => ensureDirectoryPlaceholder(client, `${prefix}${folder.relativePath}`)),
+        )
+          .then(() => {
+            message.success(
+              payload.emptyFolders.length > 1
+                ? `已创建 ${payload.emptyFolders.length} 个空文件夹`
+                : '已创建空文件夹',
+            );
+            void refresh();
+          })
+          .catch((err) => {
+            message.error(err instanceof Error ? err.message : '创建文件夹失败');
+          });
+      }
+    },
+    [client, enqueue, message, prefix, refresh],
+  );
+
+  /**
+   * 打包下载(zip):对一个或多个文件/目录条目打包为单个 zip 文件并触发浏览器保存。
+   * `zipName` 由调用方决定(单个目录用目录名,多选批量固定命名),打包过程展示阻塞式进度弹窗。
+   */
+  const handleZipDownload = useCallback(
+    async (items: FileEntry[], zipName: string) => {
+      if (!client || items.length === 0) return;
+      setZipProgress({ phase: 'listing', done: 0, total: items.length });
+      setZipModalOpen(true);
+      try {
+        const blob = await buildZipFromEntries(client, items, setZipProgress);
+        triggerBlobDownload(blob, zipName);
+        message.success('打包下载完成');
+      } catch (err) {
+        message.error(err instanceof Error ? err.message : '打包下载失败');
+      } finally {
+        setZipModalOpen(false);
+        setZipProgress(null);
+      }
+    },
+    [client, message],
+  );
+
+  /** 单个目录行的「打包下载」入口:以目录名作为 zip 文件名 */
+  const handleZipDownloadEntry = useCallback(
+    (entry: FileEntry) => {
+      void handleZipDownload([entry], `${entry.name}.zip`);
+    },
+    [handleZipDownload],
+  );
+
+  /** 工具栏「打包下载已选」入口:多选时固定命名,避免依赖单个条目名称 */
+  const handleBulkZipDownload = useCallback(() => {
+    if (selectedEntries.length === 0) return;
+    const zipName =
+      selectedEntries.length === 1 ? `${selectedEntries[0].name}.zip` : `打包下载_${selectedEntries.length}项.zip`;
+    void handleZipDownload(selectedEntries, zipName);
+  }, [handleZipDownload, selectedEntries]);
 
   /**
    * 点击文件名:新标签页打开，浏览器能预览的直接展示，不能的自动下载
@@ -548,6 +659,7 @@ const AppInner: React.FC = () => {
 
   useEffect(() => {
     setSelectedRowKeys([]);
+    setSearchKeyword('');
   }, [prefix]);
 
   /** 失去 OSS 连接时清空剪贴板，避免断连后仍尝试粘贴导致误导性错误 */
@@ -630,6 +742,10 @@ const AppInner: React.FC = () => {
           onBulkCopy={() => handleCopyToClipboard(selectedEntries)}
           onBulkCut={() => handleCutToClipboard(selectedEntries)}
           onPaste={handlePasteToCurrentDirectory}
+          searchKeyword={searchKeyword}
+          onSearchKeywordChange={setSearchKeyword}
+          bulkZipDownloadDisabled={bulkZipDownloadDisabled}
+          onBulkZipDownload={handleBulkZipDownload}
         />
 
         {connected && (
@@ -644,7 +760,7 @@ const AppInner: React.FC = () => {
 
         <div className="flex min-h-0 flex-1 flex-col">
           <FileTable
-            entries={entries}
+            entries={displayedEntries}
             loading={loading}
             connected={connected}
             selectionMode={selectionMode}
@@ -660,6 +776,9 @@ const AppInner: React.FC = () => {
             onObjectAcl={handleOpenObjectAcl}
             onCopyEntry={(entry) => handleCopyToClipboard([entry])}
             onCutEntry={(entry) => handleCutToClipboard([entry])}
+            onZipDownloadEntry={handleZipDownloadEntry}
+            onDropUpload={connected ? handleDropUpload : undefined}
+            searchActive={searchKeyword.trim() !== ''}
           />
         </div>
       </Content>
@@ -730,17 +849,22 @@ const AppInner: React.FC = () => {
 
       {/* 复制/剪切粘贴过程中的阻塞式进度（不可手动关闭，完成后由 handlePasteToCurrentDirectory 关闭） */}
       <PasteProgressModal open={pasteModalOpen} progress={pasteProgress} />
+
+      {/* 打包下载(zip)过程中的阻塞式进度（不可手动关闭，完成后由 handleZipDownload 关闭） */}
+      <ZipDownloadProgressModal open={zipModalOpen} progress={zipProgress} />
     </Layout>
   );
 };
 
 /**
  * 应用根入口
- * - ConfigProvider:全局 Ant Design 主题(暖白纸感 + 雾蓝强调)
+ * - ConfigProvider:全局 Ant Design 主题(暖白纸感 + 雾蓝强调) + 中文语言包
+ *   (语言包缺省会导致排序表头 Tooltip、分页、Popconfirm 默认按钮等文案回退成英文)
  * - AntdApp:提供全局 message / notification API
  */
 const App: React.FC = () => (
   <ConfigProvider
+    locale={zhCN}
     theme={{
       algorithm: theme.defaultAlgorithm,
       token: {
