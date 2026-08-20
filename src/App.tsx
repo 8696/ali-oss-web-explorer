@@ -51,7 +51,7 @@ import type {
   RenameDirectoryProgress,
   ZipDownloadProgress,
 } from '@/types/oss';
-import { extractName } from '@/utils/format';
+import { extractName, isEditableTextFile, MAX_EDITABLE_TEXT_SIZE } from '@/utils/format';
 import type { ResolvedDropPayload } from '@/utils/dragDropUpload';
 import { useIsMobile } from '@/hooks/useIsMobile';
 
@@ -131,8 +131,10 @@ const AppInner: React.FC = () => {
   const [renameDirProgress, setRenameDirProgress] = useState<RenameDirectoryProgress | null>(null);
   /** 对象 ACL 弹窗目标(仅文件) */
   const [objectAclEntry, setObjectAclEntry] = useState<FileEntry | null>(null);
-  /** 文本编辑弹窗目标(仅可编辑的文本类文件) */
+  /** 文本编辑/预览弹窗目标(仅可编辑的文本类文件) */
   const [textEditEntry, setTextEditEntry] = useState<FileEntry | null>(null);
+  /** 弹窗当前是「编辑」还是「只读预览」:右键菜单进编辑,点文件名进预览 */
+  const [textEditReadOnly, setTextEditReadOnly] = useState(false);
   /** 当前目录文件名搜索关键字(前端过滤 entries,不发起新的 OSS 列举请求) */
   const [searchKeyword, setSearchKeyword] = useState('');
   /** 打包下载(zip)进行中时置 true，驱动 {@link ZipDownloadProgressModal} */
@@ -419,11 +421,18 @@ const AppInner: React.FC = () => {
   }, [handleZipDownload, selectedEntries]);
 
   /**
-   * 点击文件名:新标签页打开，浏览器能预览的直接展示，不能的自动下载
+   * 点击文件名:
+   * - 文本类文件(且未超过在线编辑大小上限)直接在弹窗里只读预览内容;
+   * - 其他类型仍走原逻辑:新标签页打开签名 URL，浏览器能预览的直接展示，不能的自动下载。
    */
   const handlePreviewFile = useCallback(
     (entry: FileEntry) => {
       if (!client) return;
+      if (isEditableTextFile(entry.name) && entry.size <= MAX_EDITABLE_TEXT_SIZE) {
+        setTextEditReadOnly(true);
+        setTextEditEntry(entry);
+        return;
+      }
       try {
         const url = getSignedAccessUrl(client, entry.path, 600);
         window.open(url, '_blank');
@@ -573,6 +582,7 @@ const AppInner: React.FC = () => {
 
   const handleOpenTextEdit = useCallback((entry: FileEntry) => {
     if (entry.type !== 'file') return;
+    setTextEditReadOnly(false);
     setTextEditEntry(entry);
   }, []);
 
@@ -600,6 +610,7 @@ const AppInner: React.FC = () => {
 
   const handleTextEditorModalCancel = useCallback(() => {
     setTextEditEntry(null);
+    setTextEditReadOnly(false);
   }, []);
 
   /**
@@ -829,6 +840,7 @@ const AppInner: React.FC = () => {
       <TextEditorModal
         open={!!textEditEntry}
         entry={textEditEntry}
+        readOnly={textEditReadOnly}
         onFetchContent={handleFetchTextContent}
         onSaveContent={handleSaveTextContent}
         onCancel={handleTextEditorModalCancel}
