@@ -159,3 +159,20 @@ export interface PasteProgress {
   /** 当前子阶段总对象数（目录复制/删除时可能很大） */
   total: number;
 }
+
+/**
+ * 打包下载（zip）进度，供 {@link ZipDownloadProgressModal} 展示。
+ *
+ * - `listing`：正在递归列举选中目录下的全部对象；
+ * - `downloading`：正在逐个从 OSS 拉取对象内容并写入 zip；
+ * - `packing`：全部对象已写入，正在生成最终 zip 文件（可能耗时，尤其文件较多/较大时）。
+ */
+export interface ZipDownloadProgress {
+  phase: 'listing' | 'downloading' | 'packing';
+  /** 当前阶段已完成数量 */
+  done: number;
+  /** 当前阶段总数量 */
+  total: number;
+  /** `downloading` 阶段正在处理的对象名，便于用户了解卡在哪个文件 */
+  currentName?: string;
+}

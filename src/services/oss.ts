@@ -10,6 +10,7 @@
  */
 
 import OSS from 'ali-oss';
+import JSZip from 'jszip';
 import {
   RECYCLE_BIN_FOLDER,
   ROOT_RECYCLE_BIN_PREFIX,
@@ -24,6 +25,7 @@ import type {
   ObjectAcl,
   PasteProgress,
   RenameDirectoryProgress,
+  ZipDownloadProgress,
 } from '@/types/oss';
 import { extractName, MAX_EDITABLE_TEXT_SIZE } from '@/utils/format';
 
@@ -280,6 +282,20 @@ export async function createDirectory(client: OSS, prefix: string, folderName: s
   const objectKey = `${prefix}${sanitized}/`;
   // 内容为空 Buffer,Content-Type 标记为目录占位
   await client.put(objectKey, new Blob([], { type: 'application/x-directory' }));
+}
+
+/**
+ * 在任意完整前缀下创建一个「目录占位」对象,与 {@link createDirectory} 写入方式一致,
+ * 区别在于此处直接接收完整前缀(可含多级子路径),用于拖拽上传空文件夹时保留其目录结构。
+ *
+ * @param client OSS 客户端
+ * @param fullPrefix 完整目录前缀,必须以 "/" 结尾,例如 "docs/photos/empty/"
+ */
+export async function ensureDirectoryPlaceholder(client: OSS, fullPrefix: string): Promise<void> {
+  if (!fullPrefix.endsWith('/')) {
+    throw new Error('目录前缀必须以 "/" 结尾');
+  }
+  await client.put(fullPrefix, new Blob([], { type: 'application/x-directory' }));
 }
 
 /**
@@ -1173,4 +1189,120 @@ export async function deleteDirectory(
     await client.deleteMulti(chunk, { quiet: true });
     onProgress?.({ phase: 'delete', done: Math.min(i + chunk.length, total), total });
   }
+}
+
+/** zip 打包计划中的一项：文件夹项仅在 zip 内建目录，不产生下载请求 */
+interface ZipPlanItem {
+  /** zip 内的相对路径 */
+  relPath: string;
+  isFolder: boolean;
+  /** 仅文件项存在:对应的 OSS 对象 Key */
+  objectKey?: string;
+}
+
+/**
+ * 将选中的文件/目录条目打包为 zip 的下载计划(不发起下载,仅列举与规划路径)
+ *
+ * - 文件条目:zip 内相对路径即为其文件名(与选中时同级,置于 zip 根目录)
+ * - 目录条目:递归列举其下全部对象,以目录名作为 zip 内的根文件夹,原样保留内部层级
+ * - 目录下以 `/` 结尾的 0 字节占位对象(空子文件夹)只建空文件夹,不下载内容
+ */
+async function planZipEntries(client: OSS, entries: FileEntry[]): Promise<ZipPlanItem[]> {
+  const items: ZipPlanItem[] = [];
+  for (const entry of entries) {
+    if (entry.type === 'file') {
+      items.push({ relPath: entry.name, isFolder: false, objectKey: entry.path });
+      continue;
+    }
+    const oldPrefix = entry.path.endsWith('/') ? entry.path : `${entry.path}/`;
+    const keys = await listAllObjectKeysWithPrefix(client, oldPrefix);
+    if (keys.length === 0) {
+      items.push({ relPath: entry.name, isFolder: true });
+      continue;
+    }
+    for (const key of keys) {
+      const suffix = key.startsWith(oldPrefix) ? key.slice(oldPrefix.length) : key;
+      if (suffix === '') continue;
+      const relPath = `${entry.name}/${suffix}`;
+      if (key.endsWith('/')) {
+        items.push({ relPath, isFolder: true });
+      } else {
+        items.push({ relPath, isFolder: false, objectKey: key });
+      }
+    }
+  }
+  return items;
+}
+
+/**
+ * 将选中的文件与目录打包为一个 zip 并返回 Blob,供调用方触发浏览器下载。
+ *
+ * 分三阶段上报进度(见 {@link ZipDownloadProgress}):
+ * 1. `listing`  —— 逐个解析选中条目(目录需递归列举其下全部对象);
+ * 2. `downloading` —— 依次从 OSS 拉取每个文件内容并写入 zip(逐个请求,避免同时占满带宽);
+ * 3. `packing`  —— 全部内容写入后生成最终 zip 文件,对象较多或较大时可能耗时明显。
+ *
+ * @param client OSS 客户端
+ * @param entries 待打包的条目(可混合文件与目录)
+ * @param onProgress 进度回调
+ * @throws 选中桶根系统目录「回收站」,或任意对象下载失败时抛出中文错误
+ */
+export async function buildZipFromEntries(
+  client: OSS,
+  entries: FileEntry[],
+  onProgress?: (p: ZipDownloadProgress) => void,
+): Promise<Blob> {
+  const deduped = Array.from(new Map(entries.map((e) => [e.path, e])).values());
+  if (deduped.some((entry) => isRecycleBinDirectoryEntry(entry))) {
+    throw new Error(`无法打包桶根系统目录「${RECYCLE_BIN_FOLDER}」`);
+  }
+
+  onProgress?.({ phase: 'listing', done: 0, total: deduped.length });
+  const planned: ZipPlanItem[][] = [];
+  for (let i = 0; i < deduped.length; i++) {
+    planned.push(await planZipEntries(client, [deduped[i]]));
+    onProgress?.({ phase: 'listing', done: i + 1, total: deduped.length });
+  }
+  const items = planned.flat();
+
+  const zip = new JSZip();
+  const fileItems = items.filter((it): it is ZipPlanItem & { objectKey: string } => !it.isFolder && Boolean(it.objectKey));
+  items.filter((it) => it.isFolder).forEach((it) => zip.folder(it.relPath));
+
+  const total = fileItems.length;
+  onProgress?.({ phase: 'downloading', done: 0, total, currentName: fileItems[0]?.relPath });
+  for (let i = 0; i < fileItems.length; i++) {
+    const it = fileItems[i];
+    try {
+      const result = await (client as OSS & {
+        get(key: string, options: Record<string, unknown>): Promise<{ content: ArrayBuffer }>;
+      }).get(it.objectKey, { responseType: 'arraybuffer' });
+      zip.file(it.relPath, result.content as ArrayBuffer);
+    } catch (err) {
+      throw normalizeOSSBrowserError(err);
+    }
+    onProgress?.({ phase: 'downloading', done: i + 1, total, currentName: fileItems[i + 1]?.relPath ?? it.relPath });
+  }
+
+  onProgress?.({ phase: 'packing', done: 0, total: 1 });
+  const blob = await zip.generateAsync({ type: 'blob' });
+  onProgress?.({ phase: 'packing', done: 1, total: 1 });
+  return blob;
+}
+
+/**
+ * 触发浏览器保存一个 Blob 为文件(通过临时 `<a download>` 元素)
+ *
+ * @param blob 待保存的二进制内容
+ * @param fileName 建议的文件名(含扩展名)
+ */
+export function triggerBlobDownload(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

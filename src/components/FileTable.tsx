@@ -4,6 +4,8 @@
  * 文件浏览器核心组件。
  * 使用 Ant Design Table 展示当前目录下的文件和子目录。
  * 支持单击目录进入下级、单击文件名预览;行内操作统一收进图标下拉菜单。
+ * 支持点击列头排序(文件夹始终置顶,再按名称/大小/修改时间比较);
+ * 支持将文件或文件夹拖拽到表格区域直接上传(递归展开文件夹并保留其层级结构,详见 `utils/dragDropUpload`)。
  *
  * 回收站相关:
  *   - 桶根系统目录「回收站」操作列为空(无按钮);多选时不可勾选;
@@ -19,10 +21,12 @@ import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from '
 import { Table, Button, Typography, Empty, Dropdown, App as AntdApp } from 'antd';
 import type { MenuProps } from 'antd';
 import {
+  CloudUploadOutlined,
   CopyOutlined,
   DeleteOutlined,
   DownloadOutlined,
   EditOutlined,
+  FileZipOutlined,
   FormOutlined,
   EllipsisOutlined,
   LinkOutlined,
@@ -37,6 +41,7 @@ import { resolveFileIcon } from '@/components/fileIcon';
 import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 import { isRecycleBinDirectoryEntry } from '@/constants/recycleBin';
 import { useIsMobile } from '@/hooks/useIsMobile';
+import { resolveDroppedItems, type ResolvedDropPayload } from '@/utils/dragDropUpload';
 
 /** 虚拟列表 tbody 最小滚动高度(px)，低于此值体验较差 */
 const VIRTUAL_BODY_MIN = 160;
@@ -74,6 +79,15 @@ export interface FileTableProps {
   onCopyEntry: (entry: FileEntry) => void;
   /** 将当前行加入剪贴板为剪切 */
   onCutEntry: (entry: FileEntry) => void;
+  /** 打包下载该目录为 zip(仅目录行展示入口) */
+  onZipDownloadEntry: (entry: FileEntry) => void;
+  /**
+   * 拖拽文件/文件夹到表格区域释放时触发上传;未连接时不会调用。
+   * 支持文件夹:递归展开为文件列表(保留相对路径)与空文件夹列表,由父组件分别处理上传与目录占位创建。
+   */
+  onDropUpload?: (payload: ResolvedDropPayload) => void;
+  /** 是否正在按文件名搜索过滤(用于区分「目录为空」与「无匹配结果」两种空状态文案) */
+  searchActive?: boolean;
 }
 
 export const FileTable: React.FC<FileTableProps> = ({
@@ -93,6 +107,9 @@ export const FileTable: React.FC<FileTableProps> = ({
   onObjectAcl,
   onCopyEntry,
   onCutEntry,
+  onZipDownloadEntry,
+  onDropUpload,
+  searchActive,
 }) => {
   const isMobile = useIsMobile();
   const tableWrapRef = useRef<HTMLDivElement>(null);
@@ -103,6 +120,72 @@ export const FileTable: React.FC<FileTableProps> = ({
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
   /** 全局 Modal API,用于目录重命名/剪切的二次确认 */
   const { modal } = AntdApp.useApp();
+
+  /**
+   * 拖拽上传:是否正在拖拽文件悬停在表格区域上方(用于展示遮罩提示)
+   * 用计数器而非布尔值,避免子元素 dragenter/dragleave 冒泡导致遮罩闪烁。
+   */
+  const dragDepthRef = useRef(0);
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  const handleDragEnter = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      if (!onDropUpload) return;
+      e.preventDefault();
+      dragDepthRef.current += 1;
+      setIsDragOver(true);
+    },
+    [onDropUpload],
+  );
+
+  const handleDragOver = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      if (!onDropUpload) return;
+      e.preventDefault();
+    },
+    [onDropUpload],
+  );
+
+  const handleDragLeave = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      if (!onDropUpload) return;
+      e.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) {
+        setIsDragOver(false);
+      }
+    },
+    [onDropUpload],
+  );
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      if (!onDropUpload) return;
+      e.preventDefault();
+      dragDepthRef.current = 0;
+      setIsDragOver(false);
+
+      // `webkitGetAsEntry` 必须在事件处理函数内同步调用,故先同步取出 items 引用再异步递归遍历
+      const items = e.dataTransfer.items;
+      if (items && items.length > 0) {
+        void resolveDroppedItems(items).then((payload) => {
+          if (payload.files.length === 0 && payload.emptyFolders.length === 0) return;
+          onDropUpload(payload);
+        });
+        return;
+      }
+
+      // 极少数不支持 DataTransferItemList 的浏览器兜底:仅处理顶层文件,不含文件夹
+      const files = Array.from(e.dataTransfer.files ?? []);
+      if (files.length > 0) {
+        onDropUpload({
+          files: files.map((file) => ({ file, relativePath: file.name })),
+          emptyFolders: [],
+        });
+      }
+    },
+    [onDropUpload],
+  );
 
   const handleRowClick = useCallback(
     (record: FileEntry) => {
@@ -117,11 +200,20 @@ export const FileTable: React.FC<FileTableProps> = ({
   );
 
   const columns: ColumnsType<FileEntry> = useMemo(() => {
+    /** 排序统一让文件夹置顶(与大多数本地文件管理器习惯一致),再按各列自身规则比较 */
+    const withDirectoryFirst = (
+      compare: (a: FileEntry, b: FileEntry) => number,
+    ) => (a: FileEntry, b: FileEntry) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      return compare(a, b);
+    };
+
     const nameColumn: ColumnsType<FileEntry>[number] = {
       title: '名称',
       dataIndex: 'name',
       key: 'name',
       ellipsis: true,
+      sorter: withDirectoryFirst((a, b) => a.name.localeCompare(b.name)),
       render: (name: string, record: FileEntry) => {
         const isFolder = record.type === 'directory';
         const { Component, color } = resolveFileIcon(name, isFolder, isFolder ? record.path : undefined);
@@ -145,6 +237,7 @@ export const FileTable: React.FC<FileTableProps> = ({
       key: 'size',
       width: 132,
       align: 'right',
+      sorter: withDirectoryFirst((a, b) => a.size - b.size),
       render: (size: number, record: FileEntry) => (
         <span className="text-sm text-muted">
           {record.type === 'directory' ? '-' : formatFileSize(size)}
@@ -157,6 +250,9 @@ export const FileTable: React.FC<FileTableProps> = ({
       dataIndex: 'lastModified',
       key: 'lastModified',
       width: 196,
+      sorter: withDirectoryFirst(
+        (a, b) => new Date(a.lastModified ?? 0).getTime() - new Date(b.lastModified ?? 0).getTime(),
+      ),
       render: (val: string | undefined, record: FileEntry) => (
         <span className="text-sm text-muted">
           {record.type === 'directory' ? '-' : formatDateTime(val)}
@@ -200,15 +296,26 @@ export const FileTable: React.FC<FileTableProps> = ({
         const menuItems: MenuProps['items'] = [];
 
         if (isDirectory) {
-          menuItems.push({
-            key: 'rename',
-            icon: <FormOutlined />,
-            label: '重命名',
-            onClick: ({ domEvent }) => {
-              domEvent.stopPropagation();
-              triggerDirectoryRename();
+          menuItems.push(
+            {
+              key: 'rename',
+              icon: <FormOutlined />,
+              label: '重命名',
+              onClick: ({ domEvent }) => {
+                domEvent.stopPropagation();
+                triggerDirectoryRename();
+              },
             },
-          });
+            {
+              key: 'zip-download',
+              icon: <FileZipOutlined />,
+              label: '打包下载',
+              onClick: ({ domEvent }) => {
+                domEvent.stopPropagation();
+                onZipDownloadEntry(record);
+              },
+            },
+          );
         } else {
           menuItems.push(
             {
@@ -346,6 +453,7 @@ export const FileTable: React.FC<FileTableProps> = ({
     onGenerateUrl,
     onObjectAcl,
     onRename,
+    onZipDownloadEntry,
   ]);
 
   /** 多选模式下为表格启用行选择;系统「回收站」行禁止勾选,与批量删除禁用规则一致 */
@@ -413,8 +521,18 @@ export const FileTable: React.FC<FileTableProps> = ({
       />
     <div
       ref={tableWrapRef}
-      className="modern-file-table file-table-virtual flex min-h-0 flex-1 flex-col"
+      className="modern-file-table file-table-virtual relative flex min-h-0 flex-1 flex-col"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
+      {isDragOver && (
+        <div className="file-table-drop-overlay pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary bg-primary/5 text-primary">
+          <CloudUploadOutlined style={{ fontSize: 32 }} />
+          <span className="text-sm font-medium">释放鼠标上传到当前目录（支持整个文件夹）</span>
+        </div>
+      )}
       <Table<FileEntry>
         dataSource={entries}
         columns={columns}
@@ -428,7 +546,7 @@ export const FileTable: React.FC<FileTableProps> = ({
         className="min-h-0 flex-1"
         locale={{
           emptyText: connected ? (
-            <Empty description="当前目录为空" />
+            <Empty description={searchActive ? '未找到匹配的文件' : '当前目录为空'} />
           ) : (
             <Empty
               description={

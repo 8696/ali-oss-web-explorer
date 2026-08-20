@@ -2,21 +2,24 @@
  * Toolbar
  *
  * 文件浏览器顶部的操作工具栏。
- * 集成:上传、新建文件夹、多选模式、批量剪切/复制与粘贴到当前目录(粘贴前 Popconfirm)、批量删除(经 {@link DeleteConfirmModal} 二次确认)、刷新、OSS 配置入口。
+ * 集成:上传、新建文件夹、多选模式、批量剪切/复制与粘贴到当前目录(粘贴前 Popconfirm)、批量删除(经 {@link DeleteConfirmModal} 二次确认)、
+ * 批量打包下载(zip)、当前目录文件名搜索(前端过滤,不发起新请求)、刷新、OSS 配置入口。
  * 批量删除失败时不关闭确认弹窗,由父组件 `onBulkDelete` 抛错;成功时本组件在 `onConfirm` 内关闭弹窗。
  * 移动端以图标按钮为主,减少横向占位;桌面端保留完整文案。
  */
 
 import React, { useRef, useState } from 'react';
-import { Button, Popconfirm, Space, Tooltip } from 'antd';
+import { Button, Input, Popconfirm, Space, Tooltip } from 'antd';
 import {
   CheckSquareOutlined,
   CloudUploadOutlined,
   CopyOutlined,
   DeleteOutlined,
+  FileZipOutlined,
   FolderAddOutlined,
   ReloadOutlined,
   ScissorOutlined,
+  SearchOutlined,
   SettingOutlined,
   SnippetsOutlined,
 } from '@ant-design/icons';
@@ -60,6 +63,14 @@ export interface ToolbarProps {
   pasteIsMove: boolean;
   /** 粘贴到当前目录 */
   onPaste: () => void | Promise<void>;
+  /** 当前目录名称搜索关键字(前端过滤,不发起新的 OSS 请求) */
+  searchKeyword: string;
+  /** 更新搜索关键字 */
+  onSearchKeywordChange: (value: string) => void;
+  /** 批量打包下载已选项是否不可用(无选中或含桶根「回收站」目录) */
+  bulkZipDownloadDisabled: boolean;
+  /** 打包下载已选项为 zip */
+  onBulkZipDownload: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -81,6 +92,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   pasteEntryCount,
   pasteIsMove,
   onPaste,
+  searchKeyword,
+  onSearchKeywordChange,
+  bulkZipDownloadDisabled,
+  onBulkZipDownload,
 }) => {
   const isMobile = useIsMobile();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -112,6 +127,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     ? selectedCount === 0
       ? '请先选择要复制或剪切的项'
       : '选中了「回收站」系统文件夹，无法复制或剪切'
+    : undefined;
+
+  /** 与 `bulkClipboardTooltip` 同理：无选中或选中桶根「回收站」时禁用批量打包下载 */
+  const bulkZipDownloadTooltip = bulkZipDownloadDisabled
+    ? selectedCount === 0
+      ? '请先选择要打包下载的项'
+      : '选中了「回收站」系统文件夹，无法打包下载'
     : undefined;
 
   const selectLabel = selectionMode ? '取消选择' : '选择文件';
@@ -205,6 +227,26 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             </>
           ))}
         {selectionMode &&
+          (bulkZipDownloadDisabled ? (
+            <Tooltip title={bulkZipDownloadTooltip}>
+              <span className="inline-block">
+                <Button icon={<FileZipOutlined />} disabled aria-label="打包下载已选">
+                  {isMobile ? null : `打包下载（${selectedCount}）`}
+                </Button>
+              </span>
+            </Tooltip>
+          ) : (
+            <Tooltip title={isMobile ? `打包下载（${selectedCount}）` : undefined}>
+              <Button
+                icon={<FileZipOutlined />}
+                onClick={onBulkZipDownload}
+                aria-label={`打包下载已选（${selectedCount}）`}
+              >
+                {isMobile ? null : `打包下载（${selectedCount}）`}
+              </Button>
+            </Tooltip>
+          ))}
+        {selectionMode &&
           (bulkDeleteDisabled ? (
             <Tooltip title={bulkDeleteTooltip}>
               <span className="inline-block">
@@ -256,17 +298,31 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </Tooltip>
       </Space>
 
-      <Tooltip title="OSS 连接配置">
-        <Button
-          type="text"
-          className="rounded-xl px-2 text-muted hover:!bg-hover hover:!text-ink md:px-3"
-          icon={<SettingOutlined />}
-          onClick={onOpenConfig}
-          aria-label="连接配置"
-        >
-          {isMobile ? null : '连接配置'}
-        </Button>
-      </Tooltip>
+      <div className="toolbar-search-and-settings flex shrink-0 items-center gap-2">
+        {connected && (
+          <Input
+            allowClear
+            placeholder="搜索当前目录文件名"
+            prefix={<SearchOutlined className="text-muted" />}
+            value={searchKeyword}
+            onChange={(e) => onSearchKeywordChange(e.target.value)}
+            className="toolbar-search-input"
+            style={{ width: isMobile ? 140 : 220 }}
+            aria-label="搜索当前目录文件名"
+          />
+        )}
+        <Tooltip title="OSS 连接配置">
+          <Button
+            type="text"
+            className="rounded-xl px-2 text-muted hover:!bg-hover hover:!text-ink md:px-3"
+            icon={<SettingOutlined />}
+            onClick={onOpenConfig}
+            aria-label="连接配置"
+          >
+            {isMobile ? null : '连接配置'}
+          </Button>
+        </Tooltip>
+      </div>
 
       <input
         ref={fileInputRef}
